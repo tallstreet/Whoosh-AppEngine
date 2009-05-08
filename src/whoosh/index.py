@@ -25,6 +25,7 @@ from bisect import bisect_right
 import cPickle
 from threading import Lock
 from array import array
+import generalcounter
 
 from whoosh import fields, store
 
@@ -77,6 +78,33 @@ def _segment_pattern(indexname):
     """
     
     return re.compile("(_%s_[0-9]+).(%s)" % (indexname, _EXTENSIONS))
+
+def getdatastoreindex(name, schema = None, indexname = None, **kwargs):
+    """Convenience function to create an index in a directory. Takes care of creating
+    a FileStorage object for you. dirname is the filename of the directory in
+    which to create the index. schema is a fields.Schema object describing the
+    index's fields. indexname is the name of the index to create; you only need to
+    specify this if you are creating multiple indexes within the
+    same storage object.
+    
+    If you specify both a schema and keyword arguments, the schema wins.
+    
+    Returns an Index object.
+    """
+    if not indexname:
+        indexname = _DEF_INDEX_NAME
+    
+    storage = store.DataStoreStorage(name)
+    try:
+        ix = Index(storage)
+        return Index(storage, indexname = indexname)
+    except EmptyIndexError:
+        ix = Index(storage, schema=schema, create=True)
+        if kwargs and not schema:
+            schema = fields.Schema(**kwargs)
+        elif not schema and not kwargs:
+            raise Exception("You must specify either a schema or keyword arguments.")
+        return Index(storage, schema = schema, indexname = indexname, create = True)
 
 def create_in(dirname, schema = None, indexname = None, **kwargs):
     """Convenience function to create an index in a directory. Takes care of creating
@@ -344,14 +372,8 @@ class Index(DeletionMixin):
     
     def _next_segment_name(self):
         #Returns the name of the next segment in sequence.
-        if self.segment_num_lock.acquire():
-            try:
-                self.segment_counter += 1
-                return "_%s_%s" % (self.indexname, self.segment_counter)
-            finally:
-                self.segment_num_lock.release()
-        else:
-            raise IndexLockedError
+        generalcounter.increment("nextsegment")
+        return str(generalcounter.get_count("nextsegment"))
     
     def _toc_filename(self):
         # Returns the computed filename of the TOC for this

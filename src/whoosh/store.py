@@ -26,7 +26,10 @@ from threading import Lock
 
 from whoosh import tables
 from whoosh.structfile import StructFile
+import logging
 
+from google.appengine.api import memcache 
+from google.appengine.ext import db
 
 class LockError(Exception):
     pass
@@ -223,6 +226,102 @@ class RamStorage(Storage):
         if name not in self.files:
             raise NameError
         return StructFile(StringIO(self.files[name]))
+    
+    def lock(self, name):
+        if name not in self.locks:
+            self.locks[name] = Lock()
+        if not self.locks[name].acquire(False):
+            raise LockError("Could not lock %r" % name)
+        return True
+    
+    def unlock(self, name):
+        if name in self.locks:
+            self.locks[name].release()
+
+class DatastoreFile(db.Model):
+  value = db.BlobProperty()
+  
+  def __init__(self, *args, **kwargs):
+    super(DatastoreFile, self).__init__(*args, **kwargs)
+    self.data = StringIO()
+  
+  @classmethod
+  def loadfile(cls, name):
+    file = cls.get_by_key_name(name)
+    file.data = StringIO(file.value)
+    return file
+    
+  def close(self):
+    self.value = self.getvalue()
+    self.put()
+       
+  def tell(self):
+    return self.data.tell()
+
+  def write(self, data):
+    return self.data.write(data)
+   
+  def read(self, length):
+    return self.data.read(length)
+  
+  def seek(self, *args):
+    return self.data.seek(*args)
+
+  def readline(self):
+    return self.data.readline()
+   
+  def getvalue(self):
+    return self.data.getvalue()
+   
+class DataStoreStorage(Storage):
+    """
+    Storage object that keeps tables in a the appengine datastore
+    """
+    
+    def __init__(self, name):
+        self.name = name
+        self.locks = {}
+            
+    def __iter__(self):
+        return iter(self.list())
+       
+    def list(self):
+        query = DatastoreFile.all()
+        keys = []
+        for file in query:
+            keys.append(file.key().id_or_name().replace(self.name, "")) 
+        return keys
+       
+    def clean(self):
+        pass
+
+    def total_size(self):
+        return sum(self.file_length(f) for f in self.list())
+
+    def file_exists(self, name):
+        return DatastoreFile.get_by_key_name("%s%s" % (self.name, name)) != None
+    
+    def file_length(self, name):
+        return len(DatastoreFile.get_by_key_name("%s%s" % (self.name, name)).value)
+
+    def delete_file(self, name):
+        return DatastoreFile.get_by_key_name("%s%s" % (self.name, name)).delete()
+
+    def rename_file(self, name, newname):
+        file = DatastoreFile.get_by_key_name("%s%s" % (self.name, name))
+        newfile = DatastoreFile(key_name="%s%s" % (self.name, newname))
+        newfile.value = file.value
+        newfile.put()
+        file.delete()
+
+    def create_file(self, name):
+        def onclose_fn(sfile):
+            sfile.file.close()
+        f = StructFile(DatastoreFile(key_name="%s%s" % (self.name, name)), name = name, onclose = onclose_fn)
+        return f
+
+    def open_file(self, name):
+        return StructFile(DatastoreFile.loadfile("%s%s" % (self.name, name)))
     
     def lock(self, name):
         if name not in self.locks:

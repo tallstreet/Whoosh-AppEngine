@@ -13,3 +13,11 @@ See LICENSE.txt for information.
 
 The primary source of information is the main Whoosh web site:
 http://whoosh.ca/
+
+Whoosh AppEngine
+================
+
+This version of whoosh is able to run on Google AppEngine (http://code.google.com/appengine/)
+and stores its index in the datastore so is able to provide full text searching.
+
+Gary Roberts <contact@tallstreet.com>
