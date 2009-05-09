@@ -247,13 +247,21 @@ class DatastoreFile(db.Model):
   
   @classmethod
   def loadfile(cls, name):
-    file = cls.get_by_key_name(name)
+    value = memcache.get(name, namespace="DatastoreFile")
+    if value is None:
+      file = cls.get_by_key_name(name)
+      memcache.set(name, file.value, namespace="DatastoreFile")
+    else:
+      file = cls(value=value)
     file.data = StringIO(file.value)
     return file
     
   def close(self):
+    oldvalue = self.value
     self.value = self.getvalue()
-    self.put()
+    if oldvalue != self.value:
+      self.put()
+      memcache.set(self.key().id_or_name(), self.value, namespace="DatastoreFile")
        
   def tell(self):
     return self.data.tell()

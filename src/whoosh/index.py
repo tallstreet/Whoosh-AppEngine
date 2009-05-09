@@ -65,12 +65,12 @@ def _toc_pattern(indexname):
     
     return re.compile("_%s_([0-9]+).toc" % indexname)
 
-def _segment_pattern(indexname):
+def _segment_pattern():
     """Returns a regular expression object that matches segment filenames.
     name is the name of the index.
     """
     
-    return re.compile("(_%s_[0-9]+).(%s)" % (indexname, _EXTENSIONS))
+    return re.compile("([0-9]+).(%s)" % (_EXTENSIONS))
 
 def getdatastoreindex(name, schema = None, indexname = None, **kwargs):
     """Convenience function to create an index in a directory. Takes care of creating
@@ -89,10 +89,8 @@ def getdatastoreindex(name, schema = None, indexname = None, **kwargs):
     
     storage = store.DataStoreStorage(name)
     try:
-        ix = Index(storage)
         return Index(storage, indexname = indexname)
     except EmptyIndexError:
-        ix = Index(storage, schema=schema, create=True)
         if kwargs and not schema:
             schema = fields.Schema(**kwargs)
         elif not schema and not kwargs:
@@ -439,7 +437,7 @@ class Index(DeletionMixin):
         current_segment_names = set([s.name for s in self.segments])
         
         tocpattern = _toc_pattern(self.indexname)
-        segpattern = _segment_pattern(self.indexname)
+        segpattern = _segment_pattern()
         
         for filename in storage:
             m = tocpattern.match(filename)
