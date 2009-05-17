@@ -386,7 +386,3 @@ if __name__ == '__main__':
     fs = highlight(txt, ["templat", "geometri"], sa, SentenceFragmenter(), UppercaseFormatter())
     print time.time() - t
     print fs
-
-
-
-

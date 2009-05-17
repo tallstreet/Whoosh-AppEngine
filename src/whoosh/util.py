@@ -185,5 +185,3 @@ def protected(func):
             raise Exception("Could not acquire sync lock")
     
     return wrapper
-
-

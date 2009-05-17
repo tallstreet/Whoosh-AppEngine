@@ -880,11 +880,3 @@ class CharacterBoosts(Format):
 
 if __name__ == '__main__':
     pass
-    
-    
-    
-    
-    
-    
-    
-

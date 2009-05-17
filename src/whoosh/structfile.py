@@ -432,8 +432,3 @@ if __name__ == '__main__':
     for i in xrange(0, 200):
         x += 0.25
         print x, byte_to_float(float_to_byte(x))
-
-
-    
-    
-    

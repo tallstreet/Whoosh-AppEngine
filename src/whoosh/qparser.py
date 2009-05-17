@@ -510,12 +510,3 @@ if __name__=='__main__':
     if pn:
         nn = pn.normalize()
         print "nn=", nn
-    
-
-
-
-
-
-
-
-

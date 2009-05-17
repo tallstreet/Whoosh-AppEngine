@@ -146,7 +146,3 @@ class Expander(object):
         tlist.sort(reverse = True)
         
         return [(t, weight) for weight, t in tlist[:number]]
-
-
-
-

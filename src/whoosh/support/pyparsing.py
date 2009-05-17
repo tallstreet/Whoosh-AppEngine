@@ -3557,7 +3557,7 @@ def indentedBlock(blockStatementExpr, indentStack, indent=True):
         - blockStatementExpr - expression defining syntax of statement that
             is repeated within the indented block
         - indentStack - list created by caller to manage indentation stack
-            (multiple statementWithIndentedBlock expressions within a single grammar
+            (multiple statemensearchhIndentedBlock expressions within a single grammar
             should share a common indentStack)
         - indent - boolean indicating whether block must be indented beyond the
             the current level; set to False for block of left-most statements

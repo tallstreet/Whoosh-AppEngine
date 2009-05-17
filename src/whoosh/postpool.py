@@ -314,9 +314,19 @@ class PostingPool(object):
         # And we're done.
         self.finished = True
 
-
-
-
-
-
-        
+#class RamPostingPool(object):
+#    """
+#    An experimental alternate implementation of PostingPool that
+#    just keeps everything in memory instead of doing an external
+#    sort on disk. This is very memory inefficient and, as it turns
+#    out, not much faster.
+#    """
+#
+#    def __init__(self):
+#        self.postings = []
+#
+#    def add_posting(self, field_num, text, doc, data):
+#        self.postings.append((field_num, text, doc, data))
+#
+#    def __iter__(self):
+#        return iter(sorted(self.postings))

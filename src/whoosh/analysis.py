@@ -728,7 +728,3 @@ if __name__ == '__main__':
     st = time.time()
     print [t.text for t in StopFilter(remove = False)(LowercaseFilter(RegexTokenizer()(txt, positions = True)))]
     print time.time() - st
-    
-
-
-

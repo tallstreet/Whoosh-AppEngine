@@ -347,14 +347,3 @@ class MultiFieldSorter(FieldSorter):
         return sorted(docnums,
                       key = lambda x: tuple((s._cache[x] for s in sorters)),
                       reverse = reverse)
-
-
-
-
-
-
-
-
-
-
-
