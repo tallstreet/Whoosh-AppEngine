@@ -25,6 +25,7 @@ from bisect import bisect_right
 import cPickle
 from threading import Lock
 from array import array
+
 import generalcounter
 
 from whoosh import fields, store
@@ -271,6 +272,7 @@ class Index(DeletionMixin):
         elif self.generation >= 0:
             self._read(schema)
         else:
+<<<<<<< HEAD:src/whoosh/index.py
             raise EmptyIndexError
         
         # Open a searcher for this index. This is used by the
@@ -287,6 +289,10 @@ class Index(DeletionMixin):
     def close(self):
         self._searcher.close()
     
+=======
+            raise EmptyIndexError
+            
+>>>>>>> 7734a4a5a1988cebc6469110ddf43b1b3d4069b7:src/whoosh/index.py
     def latest_generation(self):
         """Returns the generation number of the latest generation of this
         index.
