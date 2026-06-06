@@ -21,3 +21,4 @@ This version of whoosh is able to run on Google AppEngine (http://code.google.co
 and stores its index in the datastore so is able to provide full text searching.
 
 Gary Roberts <contact@tallstreet.com>
+
