@@ -18,17 +18,17 @@
 an index.
 """
 
-from __future__ import division
+
 import os.path, re
 from sys import byteorder
 from bisect import bisect_right
-import cPickle
+import pickle
 from threading import Lock
 from array import array
 
-import generalcounter
+# Segment identifiers are allocated locally for this benchmark.
 
-from whoosh import fields, store
+from whoosh import fields, store, lifetime
 
 
 _DEF_INDEX_NAME = "MAIN"
@@ -71,14 +71,14 @@ def _toc_pattern(indexname):
     name is the name of the index.
     """
     
-    return re.compile("_%s_([0-9]+).toc" % indexname)
+    return re.compile(r"_%s_([0-9]+)\.toc$" % re.escape(indexname))
 
 def _segment_pattern():
     """Returns a regular expression object that matches segment filenames.
     name is the name of the index.
     """
     
-    return re.compile("([0-9]+).(%s)" % (_EXTENSIONS))
+    return re.compile(r"([0-9]+)\.(%s)$" % (_EXTENSIONS))
 
 def getdatastoreindex(name, schema = None, indexname = None, **kwargs):
     """Convenience function to create an index in a directory. Takes care of creating
@@ -246,6 +246,9 @@ class Index(DeletionMixin):
         
         self.storage = storage
         self.indexname = indexname
+        self.is_closed = True
+        self._searcher = None
+        self._lease = None
         
         if schema is not None and not isinstance(schema, fields.Schema):
             raise ValueError("%r is not a Schema object" % schema)
@@ -277,16 +280,33 @@ class Index(DeletionMixin):
         # Open a searcher for this index. This is used by the
         # deletion methods, but mostly it's to keep the underlying
         # files open so they don't get deleted from underneath us.
-        self._searcher = self.searcher()
-        
+        self._lease = lifetime.Lease(self.storage,
+                                     (s.name for s in self.segments),
+                                     self._toc_filename())
+        try:
+            self._searcher = self.searcher()
+        except BaseException:
+            self._lease.close()
+            raise
+        self.is_closed = False
         self.segment_num_lock = Lock()
     
     def __del__(self):
-        if hasattr(self, "_searcher") and self._searcher and not self._searcher.is_closed:
-            self._searcher.close()
+        try:
+            self.close()
+        except Exception:
+            pass
     
     def close(self):
-        self._searcher.close()
+        if getattr(self, "is_closed", True):
+            return
+        self.is_closed = True
+        try:
+            if self._searcher is not None:
+                self._searcher.close()
+        finally:
+            if self._lease is not None:
+                self._lease.close()
     
     def latest_generation(self):
         """Returns the generation number of the latest generation of this
@@ -332,10 +352,10 @@ class Index(DeletionMixin):
         stream.write_varint(_int_size)
         stream.write_varint(_ulong_size)
         stream.write_varint(_float_size)
-        stream.write_string(byteorder)
+        stream.write_string(byteorder.encode('ascii'))
         
         stream.write_int(_index_version)
-        stream.write_string(cPickle.dumps(self.schema, -1))
+        stream.write_string(pickle.dumps(self.schema, 2))
         stream.write_int(self.generation)
         stream.write_int(self.segment_counter)
         stream.write_pickle(self.segments)
@@ -344,36 +364,39 @@ class Index(DeletionMixin):
     def _read(self, schema):
         # Reads the content of this index from the .toc file.
         stream = self.storage.open_file(self._toc_filename())
+        try:
         
-        if stream.read_varint() != _int_size or \
-           stream.read_varint() != _ulong_size or \
-           stream.read_varint() != _float_size or \
-           stream.read_string() != byteorder:
-            raise IndexError("Index was created on a different architecture")
+            if stream.read_varint() != _int_size or \
+               stream.read_varint() != _ulong_size or \
+               stream.read_varint() != _float_size or \
+               stream.read_string().decode('ascii') != byteorder:
+                raise IndexError("Index was created on a different architecture")
         
-        version = stream.read_int()
-        if version != _index_version:
-            raise IndexError("Don't know how to read index version %s" % version)
+            version = stream.read_int()
+            if version != _index_version:
+                raise IndexError("Don't know how to read index version %s" % version)
         
-        # If the user supplied a schema object with the constructor,
-        # don't load the pickled schema from the saved index.
-        if schema:
-            self.schema = schema
-            stream.skip_string()
-        else:
-            self.schema = cPickle.loads(stream.read_string())
+            # If the user supplied a schema object with the constructor,
+            # don't load the pickled schema from the saved index.
+            if schema:
+                self.schema = schema
+                stream.skip_string()
+            else:
+                self.schema = pickle.loads(stream.read_string())
         
-        generation = stream.read_int()
-        assert generation == self.generation
-        self.segment_counter = stream.read_int()
-        self.segments = stream.read_pickle()
-        stream.close()
+            generation = stream.read_int()
+            assert generation == self.generation
+            self.segment_counter = stream.read_int()
+            self.segments = stream.read_pickle()
+        finally:
+            stream.close()
     
     def _next_segment_name(self):
-        #Returns the name of the next segment in sequence.
-        generalcounter.increment("nextsegment")
-        return str(generalcounter.get_count("nextsegment"))
-    
+        numbers = [int(name.split('.', 1)[0]) for name in self.storage.list()
+                   if name.split('.', 1)[0].isdigit()]
+        self.segment_counter = max([self.segment_counter] + numbers) + 1
+        return str(self.segment_counter)
+
     def _toc_filename(self):
         # Returns the computed filename of the TOC for this
         # index name and generation.
@@ -405,6 +428,26 @@ class Index(DeletionMixin):
         had any documents successfully written to it.
         """
         return len(self.segments) == 0
+
+    def _refresh_searcher(self):
+        previous = self._searcher
+        self._searcher = self.searcher()
+        previous.close()
+
+    def delete_document(self, docnum, delete=True):
+        # Direct Index mutations keep the legacy convenience searcher current.
+        # Public readers own their copied metadata and remain unchanged.
+        self.segments.delete_document(docnum, delete=delete)
+        self._refresh_searcher()
+
+    def delete_by_query(self, q):
+        # Finish iteration before closing the old internal searcher.
+        docnums = list(q.docs(self._searcher))
+        for docnum in docnums:
+            self.segments.delete_document(docnum)
+        if docnums:
+            self._refresh_searcher()
+        return len(docnums)
     
     def optimize(self):
         """Optimizes this index's segments. This will fail if the index
@@ -418,64 +461,45 @@ class Index(DeletionMixin):
         w = writing.IndexWriter(self)
         w.commit(writing.OPTIMIZE)
     
-    def commit(self, new_segments = None):
-        """Commits pending edits (such as deletions) to this index object.
-        Raises OutOfDateError if this index is not the latest generation
-        (that is, if someone has updated the index since you opened
-        this object).
-        
-        :new_segments: a replacement SegmentSet. This is used by
-            IndexWriter to update the index after it finishes
-            writing.
-        """
-        
-        self._searcher.close()
-        
+    def commit(self, new_segments=None):
+        # Rejection must not invalidate this handle's old snapshot.
         if not self.up_to_date():
             raise OutOfDateError
-        
-        if new_segments:
-            self.segments = new_segments
-        
+        if new_segments is not None:
+            self.segments = new_segments.copy()
         self.generation += 1
         self._write()
-        self.clean_files()
-        
+        self._lease.update((s.name for s in self.segments), self._toc_filename())
+        self._searcher.close()
         self._searcher = self.searcher()
+        self.clean_files()
     
     def clean_files(self):
-        """Attempts to remove unused index files (called when a new generation
-        is created). If existing Index and/or reader objects have the files
-        open, they may not get deleted immediately (i.e. on Windows)
-        but will probably be deleted eventually by a later call to clean_files.
-        """
-        
-        storage = self.storage
-        current_segment_names = set([s.name for s in self.segments])
-        
+        # The collector may be invoked on an old handle. Disk publication,
+        # not the caller's generation, identifies the authoritative index.
+        latest = self.latest_generation()
+        keep_names, keep_tocs = lifetime.retained(self.storage)
+        if latest >= 0:
+            published = object.__new__(Index)
+            published.storage = self.storage
+            published.indexname = self.indexname
+            published.generation = latest
+            published._read(None)
+            keep_names.update(s.name for s in published.segments)
+            keep_tocs.add(published._toc_filename())
         tocpattern = _toc_pattern(self.indexname)
         segpattern = _segment_pattern()
-        
-        for filename in storage:
-            m = tocpattern.match(filename)
-            if m:
-                num = int(m.group(1))
-                if num != self.generation:
-                    try:
-                        storage.delete_file(filename)
-                    except WindowsError:
-                        # Another process still has this file open
-                        pass
-            else:
-                m = segpattern.match(filename)
-                if m:
-                    name = m.group(1)
-                    if name not in current_segment_names:
-                        try:
-                            storage.delete_file(filename)
-                        except WindowsError:
-                            # Another process still has this file open
-                            pass
+        for filename in list(self.storage):
+            toc = tocpattern.fullmatch(filename)
+            seg = segpattern.fullmatch(filename)
+            obsolete = (toc is not None and filename not in keep_tocs)
+            obsolete = obsolete or (seg is not None and seg.group(1) not in keep_names)
+            if obsolete:
+                try:
+                    self.storage.delete_file(filename)
+                except OSError:
+                    # A later collection retries transient deletion failures.
+                    pass
     
     def doc_count_all(self):
         """Returns the total number of documents, DELETED OR UNDELETED,
@@ -504,38 +528,34 @@ class Index(DeletionMixin):
         return sum(s.field_length(fieldnum) for s in self.segments)
     
     def term_reader(self):
-        """Returns a TermReader object for this index.
-        
-        :*returns*: reading.TermReader
-        """
-        
         from whoosh import reading
-        segments = self.segments
-        
-        if len(segments) == 1:
-            return reading.TermReader(self.storage, segments[0], self.schema)
-        else:
-            term_readers = [reading.TermReader(self.storage, s, self.schema)
-                            for s in segments]
-            doc_offsets = segments.doc_offsets()
-            return reading.MultiTermReader(term_readers, doc_offsets, self.schema)
+        segments = self.segments.copy()
+        readers = []
+        try:
+            for segment in segments:
+                readers.append(reading.TermReader(self.storage, segment, self.schema))
+            if len(readers) == 1:
+                return readers[0]
+            return reading.MultiTermReader(readers, segments.doc_offsets(), self.schema)
+        except BaseException:
+            for reader in readers:
+                reader.close()
+            raise
     
     def doc_reader(self):
-        """Returns a DocReader object for this index.
-        
-        :*returns*: reading.DocReader
-        """
-        
         from whoosh import reading
-        schema = self.schema
-        segments = self.segments
-        if len(segments) == 1:
-            return reading.DocReader(self.storage, segments[0], schema)
-        else:
-            doc_readers = [reading.DocReader(self.storage, s, self.schema)
-                           for s in segments]
-            doc_offsets = segments.doc_offsets()
-            return reading.MultiDocReader(doc_readers, doc_offsets, schema)
+        segments = self.segments.copy()
+        readers = []
+        try:
+            for segment in segments:
+                readers.append(reading.DocReader(self.storage, segment, self.schema))
+            if len(readers) == 1:
+                return readers[0]
+            return reading.MultiDocReader(readers, segments.doc_offsets(), self.schema)
+        except BaseException:
+            for reader in readers:
+                reader.close()
+            raise
     
     def searcher(self, **kwargs):
         """Returns a Searcher object for this index. Keyword arguments
@@ -743,9 +763,9 @@ class Segment(object):
         return "%s(%r)" % (self.__class__.__name__, self.name)
     
     def copy(self):
-        return Segment(self.name, self.max_doc,
-                       self.max_weight, self.field_length_totals,
-                       self.deleted)
+        return Segment(self.name, self.max_doc, self.max_weight,
+                       dict(self.field_length_totals or {}),
+                       None if self.deleted is None else set(self.deleted))
     
     def doc_count_all(self):
         """
@@ -808,3 +828,4 @@ class Segment(object):
         
 if __name__ == '__main__':
     pass
+

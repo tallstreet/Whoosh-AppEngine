@@ -42,8 +42,8 @@ class TestQueryParser(unittest.TestCase):
         
         try:
             w = ix.writer()
-            w.add_document(my_name=u"Green", my_value=u"It's not easy being green")
-            w.add_document(my_name=u"Red", my_value=u"Hopping mad like a playground ball")
+            w.add_document(my_name="Green", my_value="It's not easy being green")
+            w.add_document(my_name="Red", my_value="Hopping mad like a playground ball")
             w.commit()
             
             qp = qparser.QueryParser("my_value", schema=ix.schema)
@@ -81,3 +81,4 @@ class TestQueryParser(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

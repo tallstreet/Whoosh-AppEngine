@@ -505,8 +505,9 @@ if __name__=='__main__':
     s = Schema(content = TEXT, path=ID)
     
     qp = QueryParser("content", schema = s)
-    pn = qp.parse(u'hello there', normalize = False)
-    print "pn=", pn
+    pn = qp.parse('hello there', normalize = False)
+    print("pn=", pn)
     if pn:
         nn = pn.normalize()
-        print "nn=", nn
+        print("nn=", nn)
+

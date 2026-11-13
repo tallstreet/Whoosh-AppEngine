@@ -20,13 +20,13 @@ class TestSpelling(unittest.TestCase):
                     "low", "zone", "xylophone", "crown",
                     "vale", "brown", "neat", "meat"]
         
-        sp.add_words([unicode(w) for w in wordlist])
+        sp.add_words([str(w) for w in wordlist])
         
-        sugs = sp.suggest(u"reoction")
-        self.assert_(sugs)
-        self.assertEqual(sugs, [u"reaction", u"animation", u"red"])
+        sugs = sp.suggest("reoction")
+        self.assertTrue(sugs)
+        self.assertEqual(sugs, ["reaction", "animation", "red"])
 
 
 if __name__ == '__main__':
     unittest.main()
-    print 10 + 20
+    print(10 + 20)

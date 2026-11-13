@@ -22,3 +22,4 @@ and stores its index in the datastore so is able to provide full text searching.
 
 Gary Roberts <contact@tallstreet.com>
 
+

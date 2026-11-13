@@ -17,7 +17,7 @@
 """This module contains classes for scoring (and sorting) search results.
 """
 
-from __future__ import division
+
 from array import array
 from math import log, pi
 import weakref
@@ -347,3 +347,4 @@ class MultiFieldSorter(FieldSorter):
         return sorted(docnums,
                       key = lambda x: tuple((s._cache[x] for s in sorters)),
                       reverse = reverse)
+

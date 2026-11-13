@@ -18,8 +18,8 @@
 encoding and compression methods such as variable-length encoded integers.
 """
 
-from cPickle import dump as dump_pickle
-from cPickle import load as load_pickle
+from pickle import dump as dump_pickle
+from pickle import load as load_pickle
 from marshal import dump as dump_marshal
 from marshal import load as load_marshal
 from struct import calcsize, pack, unpack
@@ -68,16 +68,16 @@ def byte_to_float(b, mantissabits = 5, zeroexp = 2):
 # on the fly. This makes a small but noticeable difference.
 
 def encode_varint(i):
-    s = ""
+    s = b""
     while (i & ~0x7F) != 0:
-        s += chr((i & 0x7F) | 0x80)
+        s += bytes(((i & 0x7F) | 0x80,))
         i = i >> 7
-    s += chr(i)
+    s += bytes((i,))
     return s
 
 _varint_cache_size = 512
 _varint_cache = []
-for i in xrange(0, _varint_cache_size):
+for i in range(0, _varint_cache_size):
     _varint_cache.append(encode_varint(i))
 _varint_cache = tuple(_varint_cache)
 
@@ -127,7 +127,7 @@ class StructFile(object):
         
         # If this is wrapping a real file object (not a file-like object),
         # replace with faster variants that only work on real files.
-        if isinstance(fileobj, file):
+        if False:  # Use the portable byte-oriented implementation on Python 3.
             for typename in ("sbyte", "int", "ushort", "ulong", "float", "array"):
                 setattr(self, "write_"+typename, getattr(self, "_write_"+typename))
                 setattr(self, "read_"+typename, getattr(self, "_read_"+typename))
@@ -166,42 +166,42 @@ class StructFile(object):
         """Writes a single byte to the wrapped file, shortcut for
         file.write(chr(n)).
         """
-        self.file.write(chr(n))
+        self.file.write(bytes((n,)))
     
     def write_sbyte(self, n):
         """Writes a signed byte value to the wrapped file.
         """
         self.sbyte_array[0] = n
-        self.file.write(self.sbyte_array.tostring())
+        self.file.write(self.sbyte_array.tobytes())
     
     def write_int(self, n):
         """Writes a binary integer value to the wrapped file,.
         """
         self.int_array[0] = n
-        self.file.write(self.int_array.tostring())
+        self.file.write(self.int_array.tobytes())
     
     def write_ushort(self, n):
         """Writes an unsigned binary short integer to the wrapped file.
         """
         self.ushort_array[0] = n
-        self.file.write(self.ushort_array.tostring())
+        self.file.write(self.ushort_array.tobytes())
     
     def write_ulong(self, n):
         """Writes an unsigned binary integer value to the wrapped file.
         """
         self.ulong_array[0] = n
-        self.file.write(self.ulong_array.tostring())
+        self.file.write(self.ulong_array.tobytes())
     
     def write_float(self, n):
         """Writes a binary float value to the wrapped file.
         """
         self.float_array[0] = n
-        self.file.write(self.float_array.tostring())
+        self.file.write(self.float_array.tobytes())
     
     def write_array(self, arry):
         """Writes an array to the wrapped file.
         """
-        self.file.write(arry.tostring())
+        self.file.write(arry.tobytes())
     
     # These variants are faster but only work on built-in "file" objects
     # (not on any file-like object with a write() method). They are swapped in
@@ -248,7 +248,7 @@ class StructFile(object):
     def write_pickle(self, obj):
         """Writes a pickled representation of obj to the wrapped file.
         """
-        dump_pickle(obj, self.file, -1)
+        dump_pickle(obj, self.file, 2)
     
     def write_marshal(self, obj):
         dump_marshal(obj, self.file)
@@ -270,11 +270,11 @@ class StructFile(object):
         if i < len(_varint_cache):
             self.file.write(_varint_cache[i])
             return
-        s = ""
+        s = b""
         while (i & ~0x7F) != 0:
-            s += chr((i & 0x7F) | 0x80)
+            s += bytes(((i & 0x7F) | 0x80,))
             i = i >> 7
-        s += chr(i)
+        s += bytes((i,))
         self.file.write(s)
     
     def write_struct(self, format, data):
@@ -291,38 +291,38 @@ class StructFile(object):
     def read_sbyte(self):
         """Reads a signed byte value from the wrapped file.
         """
-        self.sbyte_array.fromstring(self.file.read(1))
+        self.sbyte_array.frombytes(self.file.read(1))
         return self.sbyte_array.pop()
     
     def read_int(self):
         """Reads a binary integer value from the wrapped file.
         """
-        self.int_array.fromstring(self.file.read(_INT_SIZE))
+        self.int_array.frombytes(self.file.read(_INT_SIZE))
         return self.int_array.pop()
     
     def read_ushort(self):
         """Reads an unsigned binary short integer value from the wrapped file.
         """
-        self.ushort_array.fromstring(self.file.read(_USHORT_SIZE))
+        self.ushort_array.frombytes(self.file.read(_USHORT_SIZE))
         return self.ushort_array.pop()
     
     def read_ulong(self):
         """Reads an unsigned binary integer value from the wrapped file.
         """
-        self.ulong_array.fromstring(self.file.read(_ULONG_SIZE))
+        self.ulong_array.frombytes(self.file.read(_ULONG_SIZE))
         return self.ulong_array.pop()
     
     def read_float(self):
         """Reads a binary floating point value from the wrapped file.
         """
-        self.float_array.fromstring(self.file.read(_FLOAT_SIZE))
+        self.float_array.frombytes(self.file.read(_FLOAT_SIZE))
         return self.float_array.pop()
     
     def read_array(self, typecode, length):
         """Reads an array of 'length' items from the wrapped file.
         """
         arry = array(typecode)
-        arry.fromstring(self.file.read(arry.itemsize * length))
+        arry.frombytes(self.file.read(arry.itemsize * length))
         return arry
     
     # These variants are faster but only work on built-in "file" objects
@@ -429,6 +429,7 @@ class StructFile(object):
 
 if __name__ == '__main__':
     x = 0.0
-    for i in xrange(0, 200):
+    for i in range(0, 200):
         x += 0.25
-        print x, byte_to_float(float_to_byte(x))
+        print(x, byte_to_float(float_to_byte(x)))
+

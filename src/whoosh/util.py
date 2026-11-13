@@ -55,7 +55,7 @@ def first_diff(a, b):
     """
     
     i = -1
-    for i in xrange(0, len(a)):
+    for i in range(0, len(a)):
         if a[i] != b[1]:
             return i
         if i == 255: return i
@@ -75,7 +75,7 @@ def prefix_encode_all(ls):
     as UTF-8.
     """
     
-    last = u''
+    last = ''
     for w in ls:
         i = first_diff(last, w)
         yield chr(i) + w[i:].encode("utf8")
@@ -85,7 +85,7 @@ def prefix_decode_all(ls):
     """Decompresses a list of strings compressed by prefix_encode().
     """
     
-    last = u''
+    last = ''
     for w in ls:
         i = ord(w[0])
         decoded = last[:i] + w[1:].decode("utf8")
@@ -185,3 +185,4 @@ def protected(func):
             raise Exception("Could not acquire sync lock")
     
     return wrapper
+

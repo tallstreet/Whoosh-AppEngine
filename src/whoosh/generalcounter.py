@@ -78,3 +78,4 @@ def increase_shards(name, num):
       config.num_shards = num
       config.put()    
   db.run_in_transaction(txn)
+

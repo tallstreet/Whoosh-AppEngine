@@ -22,7 +22,7 @@ from array import array
 from collections import defaultdict
 from tempfile import TemporaryFile
 
-from whoosh import index, postpool, reading, structfile, tables
+from whoosh import fields, index, postpool, reading, structfile, tables, lifetime
 from whoosh.fields import UnknownFieldError
 from whoosh.util import fib
 
@@ -30,6 +30,45 @@ from whoosh.util import fib
 
 class IndexingError(Exception):
     pass
+
+
+def _import_field_map(source_schema, destination_schema):
+    """Validate stored representations and map source field numbers by name."""
+    posting_types = (fields.Stored, fields.Existence, fields.Frequency,
+                     fields.Positions)
+    vector_types = (fields.Frequency, fields.Positions)
+    result = {}
+    for source_number in range(len(source_schema)):
+        name = source_schema.number_to_name(source_number)
+        if name not in destination_schema:
+            raise IndexingError("Destination has no field %r" % name)
+        source = source_schema.field_by_number(source_number)
+        destination_number = destination_schema.name_to_number(name)
+        destination = destination_schema.field_by_number(destination_number)
+
+        if type(source.format) not in posting_types or type(source.format) is not type(destination.format):
+            raise IndexingError("Incompatible posting format for %r" % name)
+        if getattr(source.format, "field_boost", None) != getattr(destination.format, "field_boost", None):
+            raise IndexingError("Incompatible posting boost for %r" % name)
+        if any(bool(getattr(source, flag)) != bool(getattr(destination, flag))
+               for flag in ("stored", "scorable", "unique")):
+            raise IndexingError("Incompatible field flags for %r" % name)
+
+        source_vector = source.vector
+        destination_vector = destination.vector
+        if source_vector is None or destination_vector is None:
+            if source_vector is not destination_vector:
+                raise IndexingError("Incompatible vector presence for %r" % name)
+        else:
+            if type(source_vector) not in vector_types or type(source_vector) is not type(destination_vector):
+                raise IndexingError("Incompatible vector format for %r" % name)
+            if source_vector.field_boost != destination_vector.field_boost:
+                raise IndexingError("Incompatible vector boost for %r" % name)
+
+        # Analysis settings affect future text ingestion, not these materialized
+        # postings. Do not compare or invoke the source/destination analyzers.
+        result[source_number] = destination_number
+    return result
 
 
 DOCLENGTH_TYPE = "H"
@@ -56,7 +95,7 @@ def MERGE_SMALL(ix, writer, segments):
     """
     
     newsegments = index.SegmentSet()
-    sorted_segment_list = sorted((s.doc_count_all(), s) for s in segments)
+    sorted_segment_list = sorted(((s.doc_count_all(), s) for s in segments), key=lambda pair: pair[0])
     total_docs = 0
     for i, (count, seg) in enumerate(sorted_segment_list):
         if count > 0:
@@ -93,23 +132,32 @@ class IndexWriter(index.DeletionMixin):
     
     def __init__(self, ix, postlimit = 4 * 1024 * 1024,
                  term_blocksize = 1 * 1024, doc_blocksize = 8 * 1024,
-                 vector_blocksize = 8 * 1024):
+                 vector_blocksize = 8 * 1024, postfanin = 8,
+                 poststorage = None):
         """
         :ix: the Index object you want to write to.
         :blocksize: the block size for tables created by this writer.
         """
         
+        if isinstance(postlimit, bool) or not isinstance(postlimit, int) or postlimit <= 0:
+            raise ValueError("postlimit must be a positive integer")
+        if isinstance(postfanin, bool) or not isinstance(postfanin, int) or postfanin < 2:
+            raise ValueError("postfanin must be an integer of at least two")
         # Obtain a lock
         self.locked = ix.lock()
         
         self.index = ix
         self.segments = ix.segments.copy()
         self.postlimit = postlimit
+        self.postfanin = postfanin
+        self.poststorage = poststorage
         self.term_blocksize = term_blocksize
         self.doc_blocksize = doc_blocksize
         self.vector_blocksize = vector_blocksize
         self._segment_writer = None
         self._searcher = None
+        self._finished = False
+        self._lease = lifetime.Lease(ix.storage, (s.name for s in self.segments))
     
     def __enter__(self):
         return self
@@ -121,11 +169,22 @@ class IndexWriter(index.DeletionMixin):
             self.commit()
     
     def _finish(self):
-        self._close_searcher()
-        self._segment_writer = None
-        # Release the lock
-        if self.locked:
-            self.index.unlock()
+        if self._finished:
+            return
+        self._finished = True
+        try:
+            self._close_searcher()
+            if self._segment_writer is not None:
+                try:
+                    self._segment_writer.cancel()
+                finally:
+                    self._segment_writer._lease.close()
+                    self._segment_writer = None
+        finally:
+            self._lease.close()
+            if self.locked:
+                self.locked = False
+                self.index.unlock()
     
     def segment_writer(self):
         """Returns the underlying SegmentWriter object."""
@@ -133,7 +192,9 @@ class IndexWriter(index.DeletionMixin):
         if not self._segment_writer:
             self._segment_writer = SegmentWriter(self.index, self.postlimit,
                                                  self.term_blocksize,
-                                                 self.doc_blocksize, self.vector_blocksize)
+                                                 self.doc_blocksize, self.vector_blocksize,
+                                                 postfanin=self.postfanin,
+                                                 poststorage=self.poststorage)
         return self._segment_writer
     
     def searcher(self):
@@ -183,6 +244,18 @@ class IndexWriter(index.DeletionMixin):
         """
         self.segment_writer().add_document(fields)
     
+    def add_index(self, source_index):
+        """Append the live indexed content of a compatible source index."""
+        # Finish validation before creating files or touching pending documents.
+        field_map = _import_field_map(source_index.schema, self.index.schema)
+        if source_index.doc_count() == 0:
+            return
+        writer = self.segment_writer()
+        if writer._doc_state.active:
+            raise IndexingError("Cannot import while a document is open")
+        for segment in source_index.segments:
+            writer.add_segment(source_index, segment, field_map=field_map)
+
     def update_document(self, **fields):
         """Adds or replaces a document. At least one of the fields for which you
         supply values must be marked as 'unique' in the index's schema.
@@ -202,7 +275,7 @@ class IndexWriter(index.DeletionMixin):
                          in self.index.schema.fields()
                          if name in fields and field.unique]
         if not unique_fields:
-            raise IndexingError("None of the fields in %r are unique" % fields.keys())
+            raise IndexingError("None of the fields in %r are unique" % list(fields.keys()))
         
         # Delete documents in which the supplied unique fields match
         s = self.searcher()
@@ -212,18 +285,18 @@ class IndexWriter(index.DeletionMixin):
         # Add the given fields
         self.add_document(**fields)
     
-    def commit(self, mergetype = MERGE_SMALL):
-        """Finishes writing and unlocks the index.
-        
-        :mergetype: How to merge existing segments. One of
-            writing.NO_MERGE, writing.MERGE_SMALL, or writing.OPTIMIZE.
-        """
-        
-        self._close_searcher()
-        if self._segment_writer or mergetype is OPTIMIZE:
-            self._merge_segments(mergetype)
-        self.index.commit(self.segments)
-        self._finish()
+    def commit(self, mergetype=MERGE_SMALL):
+        if self._finished:
+            raise IndexingError("Writer is already finished")
+        try:
+            if not self.index.up_to_date():
+                raise index.OutOfDateError
+            self._close_searcher()
+            if self._segment_writer or mergetype is OPTIMIZE:
+                self._merge_segments(mergetype)
+            self.index.commit(self.segments)
+        finally:
+            self._finish()
         
     def cancel(self):
         """Cancels any documents/deletions added by this object
@@ -271,7 +344,7 @@ class SegmentWriter(object):
     
     def __init__(self, ix, postlimit,
                  term_blocksize, doc_blocksize, vector_blocksize,
-                 name = None):
+                 name = None, postfanin = 8, poststorage = None):
         """
         :ix: the Index object in which to write the new segment.
         :postlimit: the maximum size for a run in the posting pool.
@@ -283,11 +356,14 @@ class SegmentWriter(object):
         self.schema = ix.schema
         self.storage = ix.storage
         self.name = name or ix._next_segment_name()
+        self._lease = lifetime.Lease(self.storage, (self.name,))
+        self.is_closed = False
         
         self.max_doc = 0
         self.max_weight = 0
         
-        self.pool = postpool.PostingPool(limit = postlimit)
+        self.pool = postpool.PostingPool(limit=postlimit, fan_in=postfanin,
+                                         run_storage=poststorage)
         self._scorable_fields = self.schema.scorable_fields()
         
         # Create a temporary segment object just so we can access
@@ -325,95 +401,108 @@ class SegmentWriter(object):
                              dict(self.field_length_totals))
     
     def close(self):
-        """Finishes writing the segment (flushes the posting pool out to disk) and
-        closes all open files.
-        """
-        
+        if self.is_closed:
+            return
         if self._doc_state.active:
             raise IndexingError("Called SegmentWriter.close() with a document still opened")
-        
         self._flush_pool()
-        
-        self.doclength_table.close()
-        
-        self.docs_table.close()
-        self.term_table.close()
-        
-        if self.vector_table:
-            self.vector_table.close()
+        self.cancel()
+
+    def cancel(self):
+        # Settle every write callback before releasing the staging lease.
+        # In RAM storage, close publishes the private file's bytes.
+        if self.is_closed:
+            return
+        self.is_closed = True
+        try:
+            for table in (self.doclength_table, self.docs_table, self.term_table, self.vector_table):
+                if table is not None:
+                    table.close()
+        finally:
+            self.pool.close()
         
     def add_index(self, other_ix):
-        """Adds the contents of another Index object to this segment.
-        This currently does NO checking of whether the schemas match up.
-        """
-        
-        for seg in other_ix.segments:
-            self.add_segment(other_ix, seg)
+        """Append live source documents after validating its entire schema."""
+        field_map = _import_field_map(other_ix.schema, self.schema)
+        if self._doc_state.active:
+            raise IndexingError("Cannot import while a document is open")
+        for segment in other_ix.segments:
+            self.add_segment(other_ix, segment, field_map=field_map)
 
-    def add_segment(self, ix, segment):
-        """Adds the contents of another segment to this one. This is used
-        to merge existing segments into the new one before deleting them.
-        
-        :ix: The index.Index object containing the segment to merge.
-        :segment: The index.Segment object to merge into this one.
-        """
-        
-        start_doc = self.max_doc
-        has_deletions = segment.has_deletions()
-        
-        if has_deletions:
-            doc_map = {}
-        
-        # Merge document info
-        docnum = 0
-        schema = ix.schema
-        
-        doc_reader = reading.DocReader(ix.storage, segment, schema)
+    def add_segment(self, ix, segment, field_map=None):
+        """Copy live indexed data, translating all three number spaces."""
+        if self._doc_state.active:
+            raise IndexingError("Cannot merge while a document is open")
+        if segment.doc_count() == 0:
+            return
+
+        source_schema = ix.schema
+        if field_map is None:
+            # Ordinary compaction uses the same schema; name lookup also keeps
+            # this low-level merge robust to differences in field numbering.
+            field_map = {
+                number: self.schema.name_to_number(source_schema.number_to_name(number))
+                for number in range(len(source_schema))
+            }
+
+        destination_slots = {number: slot for slot, number
+                             in enumerate(self._scorable_fields)}
+        length_slots = [(source_slot, destination_slots[field_map[source_number]])
+                        for source_slot, source_number
+                        in enumerate(source_schema.scorable_fields())]
+        # Vector rows bypass PostingPool, so order them by the OUTPUT field ID.
+        vector_numbers = sorted(source_schema.vectored_fields(),
+                                key=lambda number: field_map[number])
+        document_map = {}
+
+        document_reader = reading.DocReader(ix.storage, segment, source_schema)
         try:
-            vectored_fieldnums = ix.schema.vectored_fields()
-            if vectored_fieldnums:
-                doc_reader._open_vectors()
-                inv = doc_reader.vector_table
-                outv = self.vector_table
-            
-            ds = SegmentWriter.DocumentState(self._scorable_fields)
-            for docnum in xrange(0, segment.max_doc):
-                if not segment.is_deleted(docnum):
-                    ds.stored_fields = doc_reader[docnum]
-                    ds.field_lengths = doc_reader.doc_field_lengths(docnum)
-                    
-                    if has_deletions:
-                        doc_map[docnum] = self.max_doc
-                    
-                    for fieldnum in vectored_fieldnums:
-                        if (docnum, fieldnum) in inv:
-                            tables.copy_data(inv, (docnum, fieldnum),
-                                             outv, (self.max_doc, fieldnum),
-                                             postings = True)
-                    
-                    self._write_doc_entry(ds)
-                    self.max_doc += 1
-                
-                docnum += 1
-        
-            # Add field length totals
-            for fieldnum, total in segment.field_length_totals.iteritems():
-                self.field_length_totals[fieldnum] += total
-        
+            source_vectors = None
+            if vector_numbers:
+                document_reader._open_vectors()
+                source_vectors = document_reader.vector_table
+
+            state = SegmentWriter.DocumentState(self._scorable_fields)
+            for source_document in range(segment.max_doc):
+                if segment.is_deleted(source_document):
+                    continue
+                destination_document = self.max_doc
+                document_map[source_document] = destination_document
+                state.reset()
+                state.stored_fields = dict(document_reader[source_document])
+                source_lengths = document_reader.doc_field_lengths(source_document)
+                for source_slot, destination_slot in length_slots:
+                    state.field_lengths[destination_slot] = source_lengths[source_slot]
+
+                for source_number in vector_numbers:
+                    source_key = (source_document, source_number)
+                    if not source_vectors.blockcount or source_key not in source_vectors:
+                        continue
+                    destination_number = field_map[source_number]
+                    source_format = source_schema.field_by_number(source_number).vector
+                    destination_format = self.schema.field_by_number(destination_number).vector
+                    for term, data in source_vectors.postings(source_key, source_format.read_postvalue):
+                        self.vector_table.write_posting(term, data, destination_format.write_postvalue)
+                    self.vector_table.add_row((destination_document, destination_number), None)
+
+                self._write_doc_entry(state)
+                self.max_doc += 1
         finally:
-            doc_reader.close()
-        
-        # Merge terms
-        term_reader = reading.TermReader(ix.storage, segment, ix.schema)
+            document_reader.close()
+
+        term_reader = reading.TermReader(ix.storage, segment, source_schema)
         try:
-            for fieldnum, text, _, _ in term_reader:
-                for docnum, data in term_reader.postings(fieldnum, text):
-                    if has_deletions:
-                        newdoc = doc_map[docnum]
-                    else:
-                        newdoc = start_doc + docnum
-                    
-                    self.pool.add_posting(fieldnum, text, newdoc, data)
+            for source_number, term, _, _ in term_reader:
+                destination_number = field_map[source_number]
+                source_format = source_schema.field_by_number(source_number).format
+                frequency = source_format.interpreter("frequency")
+                for source_document, data in term_reader.postings(source_number, term):
+                    self.pool.add_posting(destination_number, term,
+                                          document_map[source_document], data)
+                    # Aggregate counts are exact and live-only. Stored document
+                    # lengths may be saturated or absent, and source totals may
+                    # include tombstones; neither can supply this contribution.
+                    self.field_length_totals[destination_number] += frequency(data)
         finally:
             term_reader.close()
 
@@ -434,7 +523,7 @@ class SegmentWriter(object):
 
     def add_document(self, fields):
         self.start_document()
-        fieldnames = [name for name in fields.keys() if not name.startswith("_")]
+        fieldnames = [name for name in list(fields.keys()) if not name.startswith("_")]
         
         schema = self.schema
         for name in fieldnames:
@@ -463,13 +552,13 @@ class SegmentWriter(object):
         
         # Check that the user added the fields in schema order
         docstate = self._doc_state
-        if fieldnum < docstate.prev_fieldnum:
+        if docstate.prev_fieldnum is not None and fieldnum < docstate.prev_fieldnum:
             raise IndexingError("Added field %r out of order (add fields in schema order)" % fieldname)
         docstate.prev_fieldnum = fieldnum
 
         # If the field is indexed, add the words in the value to the index
         if format.analyzer:
-            if not isinstance(value, unicode):
+            if not isinstance(value, str):
                 raise ValueError("%r in field %s is not unicode" % (value, fieldname))
             
             # Count of all terms in the value
@@ -569,3 +658,4 @@ class SegmentWriter(object):
 
 if __name__ == '__main__':
     pass
+

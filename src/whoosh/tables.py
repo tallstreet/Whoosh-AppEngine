@@ -167,7 +167,7 @@ class TableWriter(object):
         self.keys.append(key)
         self.pointers.append(self.table_file.tell())
         if compressed:
-            pck = dumps(buf)
+            pck = dumps(buf, 2)
             self.table_file.write_string(compress(pck, compressed))
         else:
             self.table_file.write_pickle(buf)
@@ -177,7 +177,7 @@ class TableWriter(object):
     
     def write_posting(self, id, data, writefn):
         # IDs must be added in increasing order
-        if id <= self.lastpostid:
+        if self.lastpostid is not None and id <= self.lastpostid:
             raise IndexError("IDs must increase: %r..%r" % (self.lastpostid, id))
         
         pf = self.posting_file
@@ -195,7 +195,7 @@ class TableWriter(object):
     def add_row(self, key, data):
         # Note: call this AFTER you add any postings!
         # Keys must be added in increasing order
-        if key <= self.lastkey:
+        if self.lastkey is not None and key <= self.lastkey:
             raise IndexError("Keys must increase: %r..%r" % (self.lastkey, key))
         
         rb = self.rowbuffer
@@ -204,7 +204,7 @@ class TableWriter(object):
             self.blockfilled += len(data) * data.itemsize
         else:
             # Ugh! We're pickling twice! At least it's fast.
-            self.blockfilled += len(dumps(data))
+            self.blockfilled += len(dumps(data, 2))
         self.lastkey = key
         
         if self.haspostings:
@@ -263,7 +263,7 @@ class TableReader(object):
             self.get = self._get_plain
     
     def __contains__(self, key):
-        if key < self.blockindex[0]:
+        if not self.blockindex or key < self.blockindex[0]:
             return False
         self._load_block(key)
         return key in self.itemdict
@@ -278,12 +278,12 @@ class TableReader(object):
     
     def __iter__(self):
         if self.haspostings:
-            for i in xrange(0, self.blockcount):
+            for i in range(0, self.blockcount):
                 self._load_block_num(i)
                 for key, value in self.itemlist:
                     yield (key, value[3])
         else:
-            for i in xrange(0, self.blockcount):
+            for i in range(0, self.blockcount):
                 self._load_block_num(i)
                 for key, value in self.itemlist:
                     yield (key, value)
@@ -295,13 +295,15 @@ class TableReader(object):
         return self.table_file.read_string().decode("utf8")
     
     def iter_from(self, key):
+        if not self.blockcount:
+            return
         postings = self.haspostings
         
         self._load_block(key)
         blockcount = self.blockcount
         itemlist = self.itemlist
         
-        p = bisect_left(itemlist, (key, None))
+        p = bisect_left([entry[0] for entry in itemlist], key)
         if p >= len(itemlist):
             if self.currentblock >= blockcount - 1:
                 return
@@ -342,7 +344,7 @@ class TableReader(object):
         postfile = self.table_file
         _read_id = self._read_id
         id = 0
-        for _ in xrange(0, self._seek_postings(key)):
+        for _ in range(0, self._seek_postings(key)):
             id = _read_id(id)
             yield (id, readfn(postfile))
     
@@ -484,7 +486,7 @@ class RecordWriter(object):
         self.typecode = typecode
         self.length = length
         
-        table_file.write(typecode[0])
+        table_file.write(typecode[0].encode('ascii'))
         table_file.write_ushort(length)
     
     def close(self):
@@ -499,7 +501,7 @@ class RecordWriter(object):
 class RecordReader(object):
     def __init__(self, table_file):
         self.table_file = table_file
-        self.typecode = table_file.read(1)
+        self.typecode = table_file.read(1).decode('ascii')
         
         try:
             self.read = self.table_file._type_readers[self.typecode]
@@ -583,3 +585,4 @@ class StringListReader(object):
 
 if __name__ == '__main__':
     pass
+

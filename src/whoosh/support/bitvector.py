@@ -44,7 +44,7 @@ class BitVector(object):
     
     def __iter__(self):
         get = self.__getitem__
-        for i in xrange(0, self.size):
+        for i in range(0, self.size):
             if get(i):
                 yield i
     
@@ -54,7 +54,7 @@ class BitVector(object):
     def __str__(self):
         get = self.__getitem__
         return "".join("1" if get(i) else "0"
-                       for i in xrange(0, self.size)) 
+                       for i in range(0, self.size)) 
     
     def __getitem__(self, index):
         return self.bits[index >> 3] & (1 << (index & 7)) != 0
@@ -69,7 +69,7 @@ class BitVector(object):
         if self.size != bitv.size:
             raise ValueError("Can't combine bitvectors of different sizes")
         res = BitVector(size = self.size )
-        lpb = map(op, self.bits, bitv.bits)
+        lpb = list(map(op, self.bits, bitv.bits))
         res.bits = array('B', lpb )
         return res
     
@@ -108,16 +108,17 @@ if __name__ == "__main__":
     b.set(1)
     b.set(9)
     b.set(5)
-    print b
-    print b[2]
-    print b[5]
+    print(b)
+    print(b[2])
+    print(b[5])
     b.clear(5)
-    print b[5]
-    print b
+    print(b[5])
+    print(b)
     
     c = BitVector(10)
     c.set(1)
     c.set(5)
-    print " ", b
-    print "^", c
-    print "=", b ^ c
+    print(" ", b)
+    print("^", c)
+    print("=", b ^ c)
+

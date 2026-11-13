@@ -11,7 +11,7 @@ def relative(a, b):
 
 def distance(s, t):
     m, n = len(s), len(t)
-    d = [range(n+1)]
+    d = [list(range(n+1))]
     d += [[i] for i in range(1,m+1)]
     for i in range(0,m):
         for j in range(0,n):
@@ -22,4 +22,5 @@ def distance(s, t):
                               d[i][j]+cost) # substitution
                          )
     return d[m][n]
+
 

@@ -62,7 +62,7 @@ class Guestbook(webapp.RequestHandler):
   def post(self):
     ix = getdatastoreindex("hello", schema=SEARCHSCHEMA)
     writer = ix.writer()
-    writer.add_document(content=u"%s" %  self.request.get('content'))
+    writer.add_document(content="%s" %  self.request.get('content'))
     writer.commit()
     self.redirect('/')
 
@@ -77,3 +77,4 @@ def main():
 
 if __name__ == "__main__":
   main()
+

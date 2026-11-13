@@ -21,15 +21,26 @@ RamStorage keeps the "files" in memory.
 """
 
 import os
-from cStringIO import StringIO
+from io import BytesIO as StringIO
 from threading import Lock
 
 from whoosh import tables
 from whoosh.structfile import StructFile
 import logging
 
-from google.appengine.api import memcache 
-from google.appengine.ext import db
+try:
+    from google.appengine.api import memcache
+    from google.appengine.ext import db
+except ImportError:
+    class _UnavailableDB:
+        class Model:
+            def __init__(self, *args, **kwargs):
+                raise RuntimeError('App Engine storage is outside the local benchmark')
+        @staticmethod
+        def BlobProperty(*args, **kwargs):
+            return None
+    db = _UnavailableDB()
+    memcache = None
 
 class LockError(Exception):
     pass
@@ -188,7 +199,7 @@ class RamStorage(Storage):
         return iter(self.list())
     
     def list(self):
-        return self.files.keys()
+        return list(self.files.keys())
 
     def clean(self):
         self.files = {}
@@ -360,4 +371,5 @@ def copy_to_ram(storage):
         r.close()
     #print time.time() - t, "to load index into ram"
     return ram
+
 

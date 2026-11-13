@@ -21,7 +21,7 @@ in the qparser module generates trees of these objects from user query
 strings.
 """
 
-from __future__ import division
+
 from array import array
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -151,7 +151,7 @@ class MultifieldTerm(Query):
         return "%s(%r, %r, boost = %s)" % (self.fieldnames, self.text, self.boost)
 
     def __unicode__(self):
-        return u"(%s):%s" % (u"|".join(self.fieldnames), self.text)
+        return "(%s):%s" % ("|".join(self.fieldnames), self.text)
     
     def all_terms(self, termset):
         for fn in self.fieldnames:
@@ -204,7 +204,7 @@ class MultifieldTerm(Query):
                                                        boost = self.boost):
                     accumulators[docnum] += weighting.score(searcher, fieldnum, text, docnum, weight)
         
-        return accumulators.iteritems()
+        return iter(accumulators.items())
     
 
 class SimpleQuery(Query):
@@ -228,9 +228,9 @@ class SimpleQuery(Query):
                                          self.fieldname, self.text, self.boost)
 
     def __unicode__(self):
-        t = u"%s:%s" % (self.fieldname, self.text)
+        t = "%s:%s" % (self.fieldname, self.text)
         if self.boost != 1:
-            t += u"^" + unicode(self.boost)
+            t += "^" + str(self.boost)
         return t
     
     def all_terms(self, termset):
@@ -301,9 +301,9 @@ class CompoundQuery(Query):
         return '%s(%r)' % (self.__class__.__name__, self.subqueries)
 
     def __unicode__(self):
-        r = u"("
-        r += (self.JOINT).join([unicode(s) for s in self.subqueries])
-        r += u")"
+        r = "("
+        r += (self.JOINT).join([str(s) for s in self.subqueries])
+        r += ")"
         return r
 
     def _split_queries(self):
@@ -439,7 +439,7 @@ class And(CompoundQuery):
             type = "B"
         else:
             type = "i"
-        counters = array(type, (0 for _ in xrange(0, searcher.doc_count_all())))
+        counters = array(type, (0 for _ in range(0, searcher.doc_count_all())))
         for q in self._subqueries:
             for docnum in q.docs(searcher, exclude_docs = exclude_docs):
                 counters[docnum] += 1
@@ -491,7 +491,7 @@ class And(CompoundQuery):
                 return []
         
         target = len(subqs)
-        return ((docnum, score) for docnum, score in scores.iteritems()
+        return ((docnum, score) for docnum, score in scores.items()
                 if counters[docnum] == target)
 
 
@@ -538,7 +538,7 @@ class Or(CompoundQuery):
             for docnum, weight in query.doc_scores(searcher, weighting = weighting, exclude_docs = exclude_docs):
                 scores[docnum] += weight
         
-        return scores.iteritems()
+        return iter(scores.items())
         #return ((i, score) for i, score in enumerate(scores) if score)
 
 
@@ -563,7 +563,7 @@ class Not(Query):
                                      repr(self.query))
     
     def __unicode__(self):
-        return u"NOT " + unicode(self.query)
+        return "NOT " + str(self.query)
     
     def normalize(self):
         if self.query is None:
@@ -611,7 +611,7 @@ class AndNot(Query):
                                self.positive, self.negative)
     
     def __unicode__(self):
-        return u"%s ANDNOT %s" % (self.postive, self.negative)
+        return "%s ANDNOT %s" % (self.postive, self.negative)
     
     def normalize(self):
         if self.positive is None:
@@ -818,7 +818,7 @@ class TermRange(MultiTerm):
                                    self.start, self.end)
     
     def __unicode__(self):
-        return u"%s:%s..%s" % (self.fieldname, self.start, self.end)
+        return "%s:%s..%s" % (self.fieldname, self.start, self.end)
     
     def replace(self, oldtext, newtext):
         if self.start == oldtext:
@@ -853,7 +853,7 @@ class Variations(ExpandingTerm):
         self.words = variations(self.text)
     
     def __unicode__(self):
-        return u"<%s>" % self.text
+        return "<%s>" % self.text
     
     def docs(self, searcher, exclude_docs = None):
         return self._or_query(searcher).docs(searcher, exclude_docs = exclude_docs)
@@ -880,7 +880,7 @@ class Phrase(MultiTerm):
         """
         
         for w in words:
-            if not isinstance(w, unicode):
+            if not isinstance(w, str):
                 raise ValueError("'%s' is not unicode" % w)
         
         self.fieldname = fieldname
@@ -889,7 +889,7 @@ class Phrase(MultiTerm):
         self.boost = boost
     
     def __unicode__(self):
-        return u'%s:"%s"' % (self.fieldname, u" ".join(self.words))
+        return '%s:"%s"' % (self.fieldname, " ".join(self.words))
     
     def normalize(self):
         if len(self.words) == 1:
@@ -965,7 +965,7 @@ class Phrase(MultiTerm):
             first = False
         
         #print "scores=", scores
-        return scores.iteritems()
+        return iter(scores.items())
     
     def _vector_impl(self, searcher, fieldnum, weighting, exclude_docs):
         dr = searcher.doc_reader
@@ -1025,3 +1025,4 @@ class Phrase(MultiTerm):
 
 if __name__ == '__main__':
     pass
+

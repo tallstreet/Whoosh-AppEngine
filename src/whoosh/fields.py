@@ -273,7 +273,7 @@ class Schema(object):
         :id: A field name or field number.
         """
         
-        if isinstance(id, basestring):
+        if isinstance(id, str):
             return self._by_name[id]
         return self._by_number[id]
     
@@ -312,7 +312,7 @@ class Schema(object):
         Yields ("fieldname", field_object) pairs for the fields
         in this schema.
         """
-        return self._by_name.iteritems()
+        return iter(self._by_name.items())
     
     def field_names(self):
         """
@@ -561,7 +561,7 @@ class Frequency(Format):
             for t in unstopped(self.analyzer(value)):
                 seen[t.text] += 1
             
-        return ((w, freq, freq) for w, freq in seen.iteritems())
+        return ((w, freq, freq) for w, freq in seen.items())
 
     def write_postvalue(self, stream, data):
         stream.write_varint(data)
@@ -593,7 +593,7 @@ class DocBoosts(Frequency):
         for t in unstopped(self.analyzer(value)):
             seen[t.text] += 1
         
-        return ((w, freq, (freq, doc_boost)) for w, freq in seen.iteritems())
+        return ((w, freq, (freq, doc_boost)) for w, freq in seen.items())
     
     def write_postvalue(self, stream, data):
         stream.write_varint(data[0])
@@ -622,7 +622,7 @@ class Positions(Format):
         for t in unstopped(self.analyzer(value, positions = True, start_pos = start_pos)):
             seen[t.text].append(start_pos + t.pos)
         
-        return ((w, len(poslist), poslist) for w, poslist in seen.iteritems())
+        return ((w, len(poslist), poslist) for w, poslist in seen.items())
     
     def write_postvalue(self, stream, data):
         pos_base = 0
@@ -654,7 +654,7 @@ class Positions(Format):
         if freq > 10:
             stream.read_ulong()
         
-        for _ in xrange(freq):
+        for _ in range(freq):
             pos_base += rv()
             pos_list.append(pos_base)
         
@@ -668,7 +668,7 @@ class Positions(Format):
             length = stream.read_ulong()
             stream.seek(length, 1)
         else:
-            for _ in xrange(0, freq): rv()
+            for _ in range(0, freq): rv()
         
         return freq * self.field_boost
     
@@ -694,7 +694,7 @@ class Characters(Format):
                                          start_pos = start_pos, start_char = start_char)):
             seen[t.text].append((t.pos, start_char + t.startchar, start_char + t.endchar))
         
-        return ((w, len(ls), ls) for w, ls in seen.iteritems())
+        return ((w, len(ls), ls) for w, ls in seen.items())
     
     def write_postvalue(self, stream, data):
         pos_base = 0
@@ -731,7 +731,7 @@ class Characters(Format):
         if freq > 10:
             stream.read_ulong()
         
-        for i in xrange(freq): #@UnusedVariable
+        for i in range(freq): #@UnusedVariable
             pos_base += stream.read_varint()
             
             char_base += stream.read_varint()
@@ -750,7 +750,7 @@ class Characters(Format):
             length = stream.read_ulong()
             stream.seek(length, 1)
         else:
-            for _ in xrange(0, freq): rv()
+            for _ in range(0, freq): rv()
         
         return freq * self.field_boost
     
@@ -780,7 +780,7 @@ class PositionBoosts(Format):
             boost = t.boost
             seen[t.text].append((pos, boost))
         
-        return ((w, len(poslist), poslist) for w, poslist in seen.iteritems())
+        return ((w, len(poslist), poslist) for w, poslist in seen.items())
     
     def write_postvalue(self, stream, data):
         pos_base = 0
@@ -795,7 +795,7 @@ class PositionBoosts(Format):
         freq = stream.read_varint()
         pos_base = 0
         pos_list = []
-        for _ in xrange(freq):
+        for _ in range(freq):
             pos_base += stream.read_varint()
             pos_list.append((pos_base, stream.read_8bitfloat()))
         return (freq, pos_list)
@@ -827,7 +827,7 @@ class CharacterBoosts(Format):
                                  start_char + t.startchar, start_char + t.endchar,
                                  t.boost))
         
-        return ((w, len(poslist), poslist) for w, poslist in seen.iteritems())
+        return ((w, len(poslist), poslist) for w, poslist in seen.items())
     
     def write_postvalue(self, stream, data):
         pos_base = 0
@@ -849,7 +849,7 @@ class CharacterBoosts(Format):
         pos_base = 0
         char_base = 0
         ls = []
-        for _ in xrange(stream.read_varint()):
+        for _ in range(stream.read_varint()):
             pos_base += stream.read_varint()
             
             char_base += stream.read_varint()
@@ -880,3 +880,4 @@ class CharacterBoosts(Format):
 
 if __name__ == '__main__':
     pass
+

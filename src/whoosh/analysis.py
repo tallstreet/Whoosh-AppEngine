@@ -134,7 +134,7 @@ class Token(object):
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__,
                            ", ".join(["%s=%r" % (name, value)
-                                      for name, value in self.__dict__.iteritems()]))
+                                      for name, value in self.__dict__.items()]))
         
     def copy(self):
         return copy.copy(self)
@@ -260,8 +260,8 @@ class NgramTokenizer(object):
         t = Token(positions, chars, removestops = removestops)
         
         pos = start_pos
-        for start in xrange(0, inlen - self.min + 1):
-            for size in xrange(self.min, self.max + 1):
+        for start in range(0, inlen - self.min + 1):
+            for size in range(self.min, self.max + 1):
                 end = start + size
                 if end > inlen: continue
                 
@@ -313,8 +313,8 @@ class NgramFilter(object):
             # so we'll leave the token's original position
             # untouched.
             
-            for start in xrange(0, len(text) - self.min):
-                for size in xrange(self.min, self.max + 1):
+            for start in range(0, len(text) - self.min):
+                for size in range(self.min, self.max + 1):
                     end = start + size
                     if end > len(text): continue
                     
@@ -722,9 +722,10 @@ if __name__ == '__main__':
     import time
     txt = open("/Volumes/Storage/Development/help/documents/nodes/sop/copy.txt", "rb").read().decode("utf8")
     st = time.time()
-    print [t.text for t in StopFilter()(LowercaseFilter(RegexTokenizer()(txt, positions = True)))]
-    print time.time() - st
+    print([t.text for t in StopFilter()(LowercaseFilter(RegexTokenizer()(txt, positions = True)))])
+    print(time.time() - st)
 
     st = time.time()
-    print [t.text for t in StopFilter(remove = False)(LowercaseFilter(RegexTokenizer()(txt, positions = True)))]
-    print time.time() - st
+    print([t.text for t in StopFilter(remove = False)(LowercaseFilter(RegexTokenizer()(txt, positions = True)))])
+    print(time.time() - st)
+

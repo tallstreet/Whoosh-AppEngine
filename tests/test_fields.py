@@ -26,14 +26,14 @@ class TestSchema(unittest.TestCase):
         s.add("note", fields.STORED)
         
         self.assertEqual(s.field_names(), ["content", "title", "path", "tags", "quick", "note"])
-        self.assert_("content" in s)
+        self.assertTrue("content" in s)
         self.assertFalse("buzz" in s)
-        self.assert_(isinstance(s["tags"], fields.KEYWORD))
-        self.assert_(isinstance(s[3], fields.KEYWORD))
-        self.assert_(s[0] is s.field_by_number(0))
-        self.assert_(s["title"] is s.field_by_name("title"))
-        self.assert_(s.name_to_number("path") == 2)
-        self.assert_(s.number_to_name(4) == "quick")
+        self.assertTrue(isinstance(s["tags"], fields.KEYWORD))
+        self.assertTrue(isinstance(s[3], fields.KEYWORD))
+        self.assertTrue(s[0] is s.field_by_number(0))
+        self.assertTrue(s["title"] is s.field_by_name("title"))
+        self.assertTrue(s.name_to_number("path") == 2)
+        self.assertTrue(s.number_to_name(4) == "quick")
         self.assertEqual(s.scorable_fields(), [0, 1, 4])
         
     def test_creation2(self):
@@ -46,3 +46,4 @@ class TestSchema(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+

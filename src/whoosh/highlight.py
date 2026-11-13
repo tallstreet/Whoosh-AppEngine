@@ -14,7 +14,7 @@
 # limitations under the License.
 #===============================================================================
 
-from __future__ import division
+
 from heapq import nlargest
 
 
@@ -384,5 +384,6 @@ if __name__ == '__main__':
     txt = re.sub("[\t\r\n ]+", " ", txt)
     t = time.time()
     fs = highlight(txt, ["templat", "geometri"], sa, SentenceFragmenter(), UppercaseFormatter())
-    print time.time() - t
-    print fs
+    print(time.time() - t)
+    print(fs)
+

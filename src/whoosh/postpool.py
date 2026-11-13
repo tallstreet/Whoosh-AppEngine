@@ -1,13 +1,12 @@
-
 #===============================================================================
 # Copyright 2007 Matt Chaput
-# 
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
-# 
+#
 #    http://www.apache.org/licenses/LICENSE-2.0
-# 
+#
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -15,318 +14,253 @@
 # limitations under the License.
 #===============================================================================
 
-"""Support functions and classes implementing the KinoSearch-like external sort
-merging model. This module does not contain any user-level objects.
-"""
+"""Stable, bounded-fan-in external sorting of posting records."""
 
-import os, struct, tempfile
+import heapq
 from marshal import dumps, loads
-from heapq import heapify, heapreplace, heappop
+from tempfile import TemporaryDirectory
+from uuid import uuid4
 
-from whoosh import structfile
+from whoosh.store import FileStorage
 
-_int_size = struct.calcsize("!i")
-
-# Utility functions
 
 def encode_posting(fieldNum, text, doc, data):
-    """Encodes a posting as a string, for sorting."""
-    
-    return "".join([struct.pack("!i", fieldNum),
-                    text.encode("utf8"),
-                    chr(0),
-                    struct.pack("!i", doc),
-                    dumps(data)
-                    ])
+    """Serialize a posting without treating text as a NUL-delimited field."""
+    return dumps((fieldNum, text, doc, data), 2)
+
 
 def decode_posting(posting):
-    """Decodes an encoded posting string into a
-    (field_number, text, document_number, data) tuple.
-    """
-    
-    field_num = struct.unpack("!i", posting[:_int_size])[0]
-    
-    zero = posting.find(chr(0), _int_size)
-    text = posting[_int_size:zero].decode("utf8")
-    
-    docstart = zero + 1
-    docend = docstart + _int_size
-    doc = struct.unpack("!i", posting[docstart:docend])[0]
-    
-    data = loads(posting[docend:])
-    
-    return field_num, text, doc, data
-
-def merge(run_readers, max_chunk_size):
-    # Initialize a list of terms we're "current"ly
-    # looking at, by taking the first posting from
-    # each buffer.
-    #
-    # The format of the list is
-    # [("encoded_posting", reader_number), ...]
-    #
-    # The list is sorted, and the runs are already
-    # sorted, so the first term in this list should
-    # be the absolute "lowest" term.
-    
-    current = [(r.next(), i) for i, r
-               in enumerate(run_readers)]
-    heapify(current)
-    
-    # The number of active readers (readers with more
-    # postings to available), initially equal
-    # to the total number of readers/buffers.
-    
-    active = len(run_readers)
-    
-    # Initialize the output buffer, and a variable to
-    # keep track of the output buffer size. This buffer
-    # accumulates postings from the various buffers in
-    # proper sorted order.
-    
-    output = []
-    outputBufferSize = 0
-    
-    while active > 0:
-        # Get the first ("encoded_posting", reader_number)
-        # pair and add it to the output buffer.
-        
-        p, i = current[0]
-        output.append(p)
-        outputBufferSize += len(p)
-        
-        # If the output buffer is full, "flush" it by yielding
-        # the accumulated postings back to the parent writer
-        # and clearing the output buffer.
-        
-        if outputBufferSize > max_chunk_size:
-            for p in output:
-                yield decode_posting(p)
-            output = []
-            outputBufferSize = 0
-        
-        # We need to replace the posting we just added to the output
-        # by getting the next posting from the same buffer.
-        
-        if run_readers[i] is not None:
-            # Take the first posting from buffer i and insert it into the
-            # "current" list in sorted order.
-            # The current list must always stay sorted, so the first item
-            # is always the lowest.
-            
-            p = run_readers[i].next()
-            if p:
-                heapreplace(current, (p, i))
-            else:
-                heappop(current)
-                active -= 1
-    
-    # If there are still terms in the "current" list after all the
-    # readers are empty, dump them into the output buffer.
-    
-    if len(current) > 0:
-        output.extend([p for p, i in current])
-    
-    # If there's still postings in the output buffer, yield
-    # them all to the parent writer.
-    
-    if len(output) > 0:
-        for p in output:
-            yield decode_posting(p)
+    return loads(posting)
 
 
-# Classes
+class _PoolIterator(object):
+    """An immediately reserved, explicitly closable view of one posting pool."""
 
-class RunReader(object):
-    """An iterator that yields posting strings from a "run" on disk.
-    This class buffers the reads to improve efficiency.
-    """
-    
-    def __init__(self, stream, count, buffer_size):
-        """
-        :stream: the file from which to read.
-        :count: the number of postings in the stream.
-        :buffer_size: the size (in bytes) of the read buffer to use.
-        """
-        
-        self.stream = stream
-        self.count = count
-        self.buffer_size = buffer_size
-        
-        self.buffer = []
-        self.pointer = 0
-        self.finished = False
-    
-    def close(self):
-        self.stream.close()
-    
-    def _fill(self):
-        # Clears and refills the buffer.
-        
-        # If this reader is exhausted, do nothing.
-        if self.finished:
-            return
-        
-        # Clear the buffer.
-        buffer = self.buffer = []
-        
-        # Reset the index at which the next() method
-        # reads from the buffer.
-        self.pointer = 0
-        
-        # How much we've read so far.
-        so_far = 0
-        count = self.count
-        
-        while so_far < self.buffer_size:
-            if count <= 0:
-                break
-            p = self.stream.read_string()
-            buffer.append(p)
-            so_far += len(p)
-            count -= 1
-        
-        self.count = count
-    
+    def __init__(self, pool):
+        self.pool = pool
+        self.source = None
+
     def __iter__(self):
         return self
-    
-    def next(self):
-        assert self.pointer <= len(self.buffer)
-        
-        if self.pointer == len(self.buffer):
-            self._fill()
-        
-        # If after refilling the buffer is still empty, we're
-        # at the end of the file and should stop. Probably this
-        # should raise StopIteration instead of returning None.
-        if len(self.buffer) == 0:
-            self.finished = True
-            return None
-        
-        r = self.buffer[self.pointer]
-        self.pointer += 1
-        return r
+
+    def __next__(self):
+        if self.pool.finished:
+            raise StopIteration
+        if self.source is None:
+            self.source = self.pool._iterate()
+        try:
+            return next(self.source)
+        except BaseException:
+            # The generator has stopped executing when this catch runs, so
+            # closing it is safe even if the exception retains its traceback.
+            self.pool.close()
+            raise
+
+    def _stop(self):
+        source, self.source = self.source, None
+        if source is not None:
+            source.close()
+
+    def close(self):
+        self.pool.close()
 
 
 class PostingPool(object):
-    """Represents the "pool" of all postings to be sorted. As documents are added,
-    this object writes out "runs" of sorted encoded postings. When all documents
-    have been added, this object merge sorts the runs from disk, yielding decoded
-    postings to the SegmentWriter.
+    """Sort postings with bounded buffered data and merge fan-in.
+
+    Runs contain an explicit insertion ordinal. Their payload is never part of
+    a comparison, and an ordinal survives every intermediate merge pass. Files
+    are closed between passes and only this pool's unique names are reclaimed.
     """
-    
-    def __init__(self, limit):
-        """
-        :limit: the maximum amount of memory to use at once
-            for adding postings and the merge sort.
-        """
-        
+
+    def __init__(self, limit, fan_in=8, run_storage=None):
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+            raise ValueError("limit must be a positive integer")
+        if isinstance(fan_in, bool) or not isinstance(fan_in, int) or fan_in < 2:
+            raise ValueError("fan_in must be an integer of at least two")
         self.limit = limit
+        self.fan_in = fan_in
         self.size = 0
         self.postings = []
-        self.finished = False
-        
         self.runs = []
         self.count = 0
-    
-    def add_posting(self, field_num, text, doc, data):
-        """Adds a posting to the pool."""
-        
-        if self.finished:
-            raise Exception("Can't add postings after you iterate over the pool")
-        
-        if self.size >= self.limit:
-            print "Flushing..."
-            self._flush_run()
-        
-        posting = encode_posting(field_num, text, doc, data)
-        self.size += len(posting)
-        self.postings.append(posting)
-        self.count += 1
-    
-    def _flush_run(self):
-        # Called when the memory buffer (of size self.limit) fills up.
-        # Sorts the buffer and writes the current buffer to a "run" on disk.
-        
-        if self.size > 0:
-            tempfd, tempname = tempfile.mkstemp(".run")
-            runfile = structfile.StructFile(os.fdopen(tempfd, "w+b"))
-            
-            self.postings.sort()
-            for p in self.postings:
-                runfile.write_string(p)
-            runfile.flush()
-            runfile.seek(0)
-            
-            self.runs.append((runfile, self.count))
-            print "Flushed run:", self.runs
-            
-            self.postings = []
-            self.size = 0
-            self.count = 0
-    
-    def __iter__(self):
-        # Iterating the PostingPool object performs a merge sort of
-        # the runs that have been written to disk and yields the
-        # sorted, decoded postings.
-        
-        if self.finished:
-            raise Exception("Tried to iterate on PostingPool twice")
-        
-        run_count = len(self.runs)
-        if self.postings and run_count == 0:
-            # Special case: we never accumulated enough postings to flush
-            # to disk, so the postings are still in memory: just yield
-            # them from there.
-            
-            self.postings.sort()
-            for p in self.postings:
-                yield decode_posting(p)
-            return
-        
-        if not self.postings and run_count == 0:
-            # No postings at all
-            return
-        
-        if self.postings:
-            self._flush_run()
-            run_count = len(self.runs)
-        
-        #This method does an external merge to yield postings
-        #from the (n > 1) runs built up during indexing and
-        #merging.
-        
-        # Divide up the posting pool's memory limit between the
-        # number of runs plus an output buffer.
-        max_chunk_size = int(self.limit / (run_count + 1))
-        
-        run_readers = [RunReader(run_file, count, max_chunk_size)
-                       for run_file, count in self.runs]
-        
-        for decoded_posting in merge(run_readers, max_chunk_size):
-            yield decoded_posting
-        
-        for rr in run_readers:
-            assert rr.count == 0
-            rr.close()
-        
-        # And we're done.
-        self.finished = True
+        self.finished = False
+        self._reserved = False
+        self._iterator = None
+        self._owned = set()
+        self._handles = []
+        self._serial = 0
+        self._prefix = "whoosh-pool-%s-" % uuid4().hex
+        self._directory = None
+        if run_storage is None:
+            self._directory = TemporaryDirectory(prefix="whoosh-pool-")
+            run_storage = FileStorage(self._directory.name)
+        self.run_storage = run_storage
 
-#class RamPostingPool(object):
-#    """
-#    An experimental alternate implementation of PostingPool that
-#    just keeps everything in memory instead of doing an external
-#    sort on disk. This is very memory inefficient and, as it turns
-#    out, not much faster.
-#    """
-#
-#    def __init__(self):
-#        self.postings = []
-#
-#    def add_posting(self, field_num, text, doc, data):
-#        self.postings.append((field_num, text, doc, data))
-#
-#    def __iter__(self):
-#        return iter(sorted(self.postings))
+    def add_posting(self, field_num, text, doc, data):
+        if self.finished or self._reserved:
+            raise RuntimeError("Cannot add to a consumed or closed posting pool")
+        try:
+            ordinal = self.count
+            raw = dumps((field_num, text, doc, ordinal, data), 2)
+            if self.postings and self.size + len(raw) > self.limit:
+                self._flush_run()
+            self.postings.append(((field_num, text, doc, ordinal), raw))
+            self.size += len(raw)
+            self.count += 1
+            # An oversized record remains valid, but do not combine it with
+            # any later record in the ingestion buffer.
+            if self.size >= self.limit:
+                self._flush_run()
+        except BaseException:
+            self.close()
+            raise
+
+    def _new_name(self):
+        name = "%s%d.run" % (self._prefix, self._serial)
+        self._serial += 1
+        self._owned.add(name)
+        return name
+
+    def _create(self, name):
+        handle = self.run_storage.create_file(name)
+        self._handles.append(handle)
+        return handle
+
+    def _open(self, name):
+        handle = self.run_storage.open_file(name)
+        self._handles.append(handle)
+        return handle
+
+    def _close_handle(self, handle):
+        if handle in self._handles:
+            try:
+                handle.close()
+            finally:
+                self._handles.remove(handle)
+
+    def _delete_run(self, name):
+        try:
+            self.run_storage.delete_file(name)
+        except (FileNotFoundError, NameError):
+            # Missing names after failed creation use different exception
+            # types in FileStorage and RamStorage.
+            pass
+        self._owned.discard(name)
+
+    def _write_run(self, records):
+        name = self._new_name()
+        stream = None
+        count = 0
+        try:
+            stream = self._create(name)
+            for raw in records:
+                stream.write_string(raw)
+                count += 1
+        finally:
+            # A failing output write must unwind active input generators too.
+            close = getattr(records, "close", None)
+            if close is not None:
+                close()
+            if stream is not None:
+                self._close_handle(stream)
+        return name, count
+
+    def _flush_run(self):
+        if not self.postings:
+            return
+        self.postings.sort(key=lambda item: item[0])
+        run = self._write_run(raw for key, raw in self.postings)
+        self.runs.append(run)
+        self.postings.clear()
+        self.size = 0
+
+    @staticmethod
+    def _key(raw):
+        posting = loads(raw)
+        return posting[:4]
+
+    def _merge_records(self, runs):
+        streams = []
+        heap = []
+        remaining = []
+        try:
+            for position, (name, count) in enumerate(runs):
+                stream = self._open(name)
+                streams.append(stream)
+                remaining.append(count)
+                if count:
+                    raw = stream.read_string()
+                    remaining[position] -= 1
+                    heap.append((self._key(raw), position, raw))
+            heapq.heapify(heap)
+            while heap:
+                key, position, raw = heapq.heappop(heap)
+                yield raw
+                if remaining[position]:
+                    raw = streams[position].read_string()
+                    remaining[position] -= 1
+                    heapq.heappush(heap, (self._key(raw), position, raw))
+        finally:
+            for stream in streams:
+                self._close_handle(stream)
+            heap.clear()
+
+    def _reduce_runs(self):
+        while len(self.runs) > self.fan_in:
+            old_runs = self.runs
+            new_runs = []
+            for offset in range(0, len(old_runs), self.fan_in):
+                group = old_runs[offset:offset + self.fan_in]
+                if len(group) == 1:
+                    new_runs.append(group[0])
+                    continue
+                output = self._write_run(self._merge_records(group))
+                new_runs.append(output)
+                for name, count in group:
+                    self._delete_run(name)
+            self.runs = new_runs
+
+    @staticmethod
+    def _decode_record(raw):
+        field_num, text, doc, ordinal, data = loads(raw)
+        return field_num, text, doc, data
+
+    def _iterate(self):
+        if not self.runs:
+            self.postings.sort(key=lambda item: item[0])
+            for key, raw in self.postings:
+                yield self._decode_record(raw)
+            return
+        self._flush_run()
+        self._reduce_runs()
+        records = self._merge_records(self.runs)
+        try:
+            for raw in records:
+                yield self._decode_record(raw)
+        finally:
+            records.close()
+
+    def __iter__(self):
+        if self.finished or self._reserved:
+            raise RuntimeError("A posting pool is single-use")
+        self._reserved = True
+        self._iterator = _PoolIterator(self)
+        return self._iterator
+
+    def close(self):
+        if self.finished:
+            return
+        self.finished = True
+        if self._iterator is not None:
+            self._iterator._stop()
+        for handle in list(self._handles):
+            self._close_handle(handle)
+        for name in list(self._owned):
+            self._delete_run(name)
+        self.runs.clear()
+        self.postings.clear()
+        self.size = 0
+        if self._directory is not None:
+            directory, self._directory = self._directory, None
+            directory.cleanup()

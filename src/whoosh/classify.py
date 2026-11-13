@@ -17,7 +17,7 @@
 """Classes and functions for classifying and extracting information from documents.
 """
 
-from __future__ import division, with_statement
+
 from collections import defaultdict
 from math import log
 
@@ -133,7 +133,7 @@ class Expander(object):
         maxweight = 0
         collection_freq = self.collection_freq
         
-        for word, weight in self.topN_weight.iteritems():
+        for word, weight in self.topN_weight.items():
             score = model.score(weight, collection_freq[word], self.top_total)
             if score > maxweight: maxweight = score
             tlist.append((score, word))
@@ -146,3 +146,4 @@ class Expander(object):
         tlist.sort(reverse = True)
         
         return [(t, weight) for weight, t in tlist[:number]]
+

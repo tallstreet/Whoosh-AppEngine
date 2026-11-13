@@ -14,7 +14,7 @@
 # limitations under the License.
 #===============================================================================
 
-from __future__ import division
+
 import time
 
 from whoosh import classify, query, scoring, util
@@ -38,8 +38,17 @@ class Searcher(util.ClosableMixin):
             instantiated.
         """
         
-        self.term_reader = ix.term_reader()
-        self.doc_reader = ix.doc_reader()
+        self.is_closed = True
+        self.term_reader = self.doc_reader = None
+        try:
+            self.term_reader = ix.term_reader()
+            self.doc_reader = ix.doc_reader()
+        except BaseException:
+            if self.term_reader is not None:
+                self.term_reader.close()
+            if self.doc_reader is not None:
+                self.doc_reader.close()
+            raise
         self.schema = ix.schema
         self._max_weight = ix.max_weight()
         self._doc_count_all = self.doc_reader.doc_count_all()
@@ -53,8 +62,11 @@ class Searcher(util.ClosableMixin):
         self._copy_methods()
     
     def __del__(self):
-        if not self.is_closed:
-            self.close()
+        try:
+            if not getattr(self, "is_closed", True):
+                self.close()
+        except Exception:
+            pass
     
     def __iter__(self):
         return iter(self.term_reader)
@@ -79,9 +91,13 @@ class Searcher(util.ClosableMixin):
         return self._max_weight
     
     def close(self):
-        self.term_reader.close()
-        self.doc_reader.close()
+        if self.is_closed:
+            return
         self.is_closed = True
+        try:
+            self.term_reader.close()
+        finally:
+            self.doc_reader.close()
     
     def document(self, **kw):
         """
@@ -108,7 +124,7 @@ class Searcher(util.ClosableMixin):
         stored fields of any documents matching the keyword arguments.
         """
         
-        q = query.And([query.Term(k, v) for k, v in kw.iteritems()])
+        q = query.And([query.Term(k, v) for k, v in kw.items()])
         doc_reader = self.doc_reader
         return (doc_reader[docnum] for docnum in q.docs(self))
     
@@ -151,7 +167,7 @@ class Searcher(util.ClosableMixin):
         
         t = time.time()
         if sortedby is not None:
-            if isinstance(sortedby, basestring):
+            if isinstance(sortedby, str):
                 sortedby = scoring.FieldSorter(sortedby)
             elif isinstance(sortedby, (list, tuple)):
                 sortedby = scoring.MultiFieldSorter(sortedby)
@@ -173,7 +189,7 @@ class Searcher(util.ClosableMixin):
                 # topdocs.best() returns a list like
                 # [(docnum, score), (docnum, score), ... ]
                 # This unpacks that into two lists: docnums and scores
-                scored_list, scores = zip(*topdocs.best())
+                scored_list, scores = list(zip(*topdocs.best()))
             else:
                 scored_list = []
                 scores = []
@@ -457,3 +473,4 @@ class Paginator(object):
 
 if __name__ == '__main__':
     pass
+

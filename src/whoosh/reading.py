@@ -23,6 +23,7 @@ from heapq import heapify, heapreplace, heappop, nlargest
 from threading import Lock, RLock
 
 from whoosh.util import ClosableMixin, protected
+from whoosh import lifetime
 from whoosh.fields import FieldConfigurationError, UnknownFieldError
 
 # Exceptions
@@ -47,20 +48,20 @@ class DocReader(ClosableMixin):
     
     def __init__(self, storage, segment, schema):
         self.storage = storage
-        self.segment = segment
+        self.segment = segment.copy()
         self.schema = schema
         self._scorable_fields = schema.scorable_fields()
-        
-        self.doclength_table = storage.open_records(segment.doclen_filename)
-        self.docs_table = storage.open_table(segment.docs_filename)
-        #self.cache = FifoCache()
-        
-        self.vector_table = None
+        self._fieldnum_to_pos = {fieldnum: i for i, fieldnum in enumerate(self._scorable_fields)}
+        self.doclength_table = self.docs_table = self.vector_table = None
         self.is_closed = False
         self._sync_lock = Lock()
-        
-        self._fieldnum_to_pos = dict((fieldnum, i) for i, fieldnum
-                                     in enumerate(schema.scorable_fields()))
+        self._lease = lifetime.Lease(storage, (segment.name,))
+        try:
+            self.doclength_table = storage.open_records(segment.doclen_filename)
+            self.docs_table = storage.open_table(segment.docs_filename)
+        except BaseException:
+            self.close()
+            raise
     
     def _open_vectors(self):
         if not self.vector_table:
@@ -78,19 +79,20 @@ class DocReader(ClosableMixin):
         """
         
         is_deleted = self.segment.is_deleted
-        for docnum in xrange(0, self.segment.max_doc):
+        for docnum in range(0, self.segment.max_doc):
             if not is_deleted(docnum):
                 yield self.docs_table.get(docnum)
     
     def close(self):
-        """Closes the open files associated with this reader.
-        """
-        
-        self.doclength_table.close()
-        self.docs_table.close()
-        if self.vector_table:
-            self.vector_table.close()
+        if self.is_closed:
+            return
         self.is_closed = True
+        try:
+            for table in (self.doclength_table, self.docs_table, self.vector_table):
+                if table is not None:
+                    table.close()
+        finally:
+            self._lease.close()
     
     def doc_count_all(self):
         """Returns the total number of documents, DELETED OR UNDELETED,
@@ -215,12 +217,11 @@ class MultiDocReader(DocReader):
                 yield result
     
     def close(self):
-        """Closes the open files associated with this reader.
-        """
-        
-        for d in self.doc_readers:
-            d.close()
+        if self.is_closed:
+            return
         self.is_closed = True
+        for reader in self.doc_readers:
+            reader.close()
     
     def doc_count_all(self):
         return sum(dr.doc_count_all() for dr in self.doc_readers)
@@ -252,9 +253,9 @@ class MultiDocReader(DocReader):
         offset = self.doc_offsets[segmentnum]
         return segmentnum, docnum - offset
     
-    def vector(self, docnum):
+    def vector(self, docnum, fieldnum):
         segmentnum, segmentdoc = self._segment_and_docnum(docnum)
-        return self.doc_readers[segmentnum].vector(segmentdoc)
+        return self.doc_readers[segmentnum].vector(segmentdoc, fieldnum)
     
     def _doc_info(self, docnum, key):
         segmentnum, segmentdoc = self._segment_and_docnum(docnum)
@@ -272,18 +273,17 @@ class TermReader(ClosableMixin):
     """
     
     def __init__(self, storage, segment, schema):
-        """
-        :storage: The storage object in which the segment resides.
-        :segment: The segment to read from.
-        :schema: The index's schema object.
-        """
-        
-        self.segment = segment
+        self.segment = segment.copy()
         self.schema = schema
-        
-        self.term_table = storage.open_table(segment.term_filename)
+        self.term_table = None
         self.is_closed = False
         self._sync_lock = Lock()
+        self._lease = lifetime.Lease(storage, (segment.name,))
+        try:
+            self.term_table = storage.open_table(segment.term_filename)
+        except BaseException:
+            self.close()
+            raise
     
     def __repr__(self):
         return "%s(%s)" % (self.__class__.__name__, self.segment)
@@ -306,10 +306,14 @@ class TermReader(ClosableMixin):
         return (self.schema.to_number(term[0]), term[1]) in self.term_table
     
     def close(self):
-        """Closes the open files associated with this reader.
-        """
-        self.term_table.close()
+        if self.is_closed:
+            return
         self.is_closed = True
+        try:
+            if self.term_table is not None:
+                self.term_table.close()
+        finally:
+            self._lease.close()
     
     def format(self, fieldname):
         """Returns the Format object corresponding to the given field name.
@@ -538,13 +542,11 @@ class MultiTermReader(TermReader):
         return self._merge_iters([r.iter_from(fieldnum, text) for r in self.term_readers])
     
     def close(self):
-        """
-        Closes the open files associated with this reader.
-        """
-        
-        for tr in self.term_readers:
-            tr.close()
+        if self.is_closed:
+            return
         self.is_closed = True
+        for reader in self.term_readers:
+            reader.close()
     
     def doc_frequency(self, fieldnum, text):
         if (fieldnum, text) not in self:
@@ -559,44 +561,22 @@ class MultiTermReader(TermReader):
         return sum(r.frequency(fieldnum, text) for r in self.term_readers)
     
     def _merge_iters(self, iterlist):
-        # Merge-sorts terms coming from a list of
-        # term iterators (TermReader.__iter__() or
-        # TermReader.iter_from()).
-        
-        # Fill in the list with the head term from each iterator.
-        # infos is a list of [headterm, iterator] lists.
-        
-        current = []
-        for it in iterlist:
-            fnum, text, docfreq, termcount = it.next()
-            current.append((fnum, text, docfreq, termcount, it))
-        heapify(current)
-        
-        # Number of active iterators
-        active = len(current)
-        while active > 0:
-            # Peek at the first term in the sorted list
-            fnum, text = current[0][:2]
-            docfreq = 0
-            termcount = 0
-            
-            # Add together all terms matching the first
-            # term in the list.
-            while current and current[0][0] == fnum and current[0][1] == text:
-                docfreq += current[0][2]
-                termcount += current[0][3]
-                it = current[0][4]
-                try:
-                    fn, t, df, tc = it.next()
-                    heapreplace(current, (fn, t, df, tc, it))
-                except StopIteration:
-                    heappop(current)
-                    active -= 1
-                
-            # Yield the term with the summed frequency and
-            # term count.
-            yield (fnum, text, docfreq, termcount)
-    
+        # Stable ordering avoids comparing iterator objects on Python 3;
+        # heapq.merge also accepts empty readers.
+        from heapq import merge
+        key = None
+        docfreq = termcount = 0
+        for fnum, text, df, tc in merge(*iterlist, key=lambda item: item[:2]):
+            current = (fnum, text)
+            if key is not None and current != key:
+                yield key[0], key[1], docfreq, termcount
+                docfreq = termcount = 0
+            key = current
+            docfreq += df
+            termcount += tc
+        if key is not None:
+            yield key[0], key[1], docfreq, termcount
+
     def postings(self, fieldnum, text, exclude_docs = None):
         """Yields raw (docnum, data) tuples for each document containing
         the current term. This is useful if you simply want to know
@@ -612,18 +592,20 @@ class MultiTermReader(TermReader):
         for i, r in enumerate(self.term_readers):
             offset = self.doc_offsets[i]
             if (fieldnum, text) in r:
-                for docnum, data in r.postings(fieldnum, text, exclude_docs = exclude_docs):
-                    yield (docnum + offset, data)
+                for docnum, data in r.postings(fieldnum, text):
+                    if exclude_docs is None or docnum + offset not in exclude_docs:
+                        yield (docnum + offset, data)
                     
     def weights(self, fieldnum, text, exclude_docs = None, boost = 1.0):
         for i, r in enumerate(self.term_readers):
             offset = self.doc_offsets[i]
             if (fieldnum, text) in r:
-                for docnum, weight in r.weights(fieldnum, text,
-                                                exclude_docs = exclude_docs, boost = boost):
-                    yield (docnum + offset, weight)
+                for docnum, weight in r.weights(fieldnum, text, boost = boost):
+                    if exclude_docs is None or docnum + offset not in exclude_docs:
+                        yield (docnum + offset, weight)
 
 
 
 if __name__ == '__main__':
     pass
+

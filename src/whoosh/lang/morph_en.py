@@ -878,7 +878,7 @@ rules = (
 
 _partition_size = 20
 _partitions = []
-for p in xrange(0, len(rules) // _partition_size + 1):
+for p in range(0, len(rules) // _partition_size + 1):
     start = p * _partition_size
     end = (p+1) * _partition_size
     pattern = "|".join("(?P<_g%s>%s)$" % (i, r[0]) for i,r in enumerate(rules[start:end]))
@@ -894,7 +894,7 @@ def variations(word):
         match = p.search(word)
         if match:
             # Get the named group that matched
-            num = int([k for k, v in match.groupdict().iteritems()
+            num = int([k for k, v in match.groupdict().items()
                        if v is not None and k.startswith("_g")][0][2:])
             # Get the positional groups for the matched group (all other
             # positional groups are None)
@@ -920,6 +920,7 @@ if __name__ == '__main__':
     import time
     t = time.clock()
     s = variations("rendering")
-    print time.clock() - t
-    print len(s)
+    print(time.clock() - t)
+    print(len(s))
     
+
