@@ -347,19 +347,33 @@ class Index(DeletionMixin):
         # Writes the content of this index to the .toc file.
         for field in self.schema:
             field.clean()
-        stream = self.storage.create_file(self._toc_filename())
-        
-        stream.write_varint(_int_size)
-        stream.write_varint(_ulong_size)
-        stream.write_varint(_float_size)
-        stream.write_string(byteorder.encode('ascii'))
-        
-        stream.write_int(_index_version)
-        stream.write_string(pickle.dumps(self.schema, 2))
-        stream.write_int(self.generation)
-        stream.write_int(self.segment_counter)
-        stream.write_pickle(self.segments)
-        stream.close()
+        # The authoritative filename must not be visible until its complete
+        # manifest is readable. This is an atomic visibility boundary, not a
+        # power-loss durability protocol; the persistent payload is unchanged.
+        destination = self._toc_filename()
+        temporary = destination + '.tmp'
+        stream = None
+        try:
+            stream = self.storage.create_file(temporary)
+            stream.write_varint(_int_size)
+            stream.write_varint(_ulong_size)
+            stream.write_varint(_float_size)
+            stream.write_string(byteorder.encode('ascii'))
+
+            stream.write_int(_index_version)
+            stream.write_string(pickle.dumps(self.schema, 2))
+            stream.write_int(self.generation)
+            stream.write_int(self.segment_counter)
+            stream.write_pickle(self.segments)
+            stream.close()
+            self.storage.rename_file(temporary, destination)
+        finally:
+            try:
+                if stream is not None and not stream.is_closed:
+                    stream.close()
+            finally:
+                if self.storage.file_exists(temporary):
+                    self.storage.delete_file(temporary)
     
     def _read(self, schema):
         # Reads the content of this index from the .toc file.

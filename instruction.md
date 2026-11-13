@@ -1,113 +1,88 @@
-# Implement optimistic online compaction for Whoosh
+# Safe generation reclamation in Whoosh
 
-The supplied legacy Whoosh engine supports appending, deleting, importing,
-ordinary optimized merges, and retained reader snapshots. Its normal writer
-holds an exclusive index lock while merging. Add a **new** compaction facility
-that constructs replacement segments while normal writes can commit, and
-publishes the replacement without losing later writes or resurrecting deletes.
+Repair the race between opening an index snapshot and reclaiming obsolete
+generations. Keep the existing public API:
 
-This is a coding task. Modify the repository implementation; preserve existing
-APIs and persistent index format. All dependencies are installed and tests run
-offline on Python 3.12 or newer.
+```python
+opened = index.Index(storage)
+reader = opened.searcher()
+```
 
-The starting code already includes schema-aware import, retained reader
-snapshots, and the bounded stable posting sorter. Preserve these working
-features, including the existing `postfanin` and `poststorage` writer options.
+`Index.refresh()` must retain its existing behavior and use the same safe
+opening semantics when it creates a new handle. No new application-facing
+reader, transaction, or compaction API is required.
 
-## API
+The supplied engine already publishes complete generation metadata through a
+temporary file and rename, maintains leases for existing readers and writers,
+and has working synchronous commits, merges, import, and posting sorting.
+Preserve those features. The defect to repair is the handoff between selecting
+a committed generation and protecting the files needed to use it.
 
-Provide `Index.compaction(segment_names)` returning a job with:
+## Required behavior
 
-- `prepare()`: construct a complete replacement for the named source segments,
-  but do not make it visible to new readers;
-- `commit()`: publish the prepared replacement atomically as one committed index
-  generation, or raise `CompactionConflict` if it cannot be reconciled;
-- `cancel()`: discard unpublished work safely and idempotently.
+1. An open overlapping a commit or `Index.clean_files()` must return a coherent
+   committed snapshot. Its metadata, stored documents, postings, deletion
+   state, and vectors must agree. It may use a generation current during that
+   open; it must not expose a mixture or fail because ordinary concurrent
+   collection removed a generation it had started to acquire. Safely retaining
+   that generation or retrying a newer committed generation are both allowed.
+   An open begun after a completed commit must see that commit or a later one.
+2. Once an Index or reader owns a snapshot, concurrent commits and collection
+   must not invalidate it. Preserve the supplied independent reader lifetimes:
+   closing one handle does not release another handle's ownership, and a
+   searcher or direct reader can outlive its parent Index.
+3. A reader paused inside a Storage operation while discovering or reading
+   generation metadata must not prevent an independent writer from committing
+   or a collector from completing. A collector paused while inspecting
+   generation metadata must also allow an independent writer to commit.
+   A collector paused immediately before a Storage deletion takes effect
+   must not prevent another reader from opening
+   and using a complete committed snapshot. Short coordination is allowed;
+   serializing these entire operations behind a shared lock is not sufficient.
+4. Collection must remain useful during acquisition. An acquiring reader may
+   retain the generation it is acquiring, but it must not prevent collection
+   of unrelated obsolete generations with no owners. After all owners and
+   acquisition attempts for an obsolete generation have ended, an ordinary
+   `clean_files()` call must reclaim its unreferenced metadata and segment files.
+   Committed current files, active writer output, and legitimately retained
+   snapshots must remain protected. The latest committed generation remains
+   authoritative even after every Index, reader, and writer owning it has
+   closed. A collector that began before that publication must still preserve
+   it, including when only older-generation handles remain open.
+5. Preserve normal writes, deletion semantics, stored fields, positional
+   postings, vectors, the on-disk format, and the supplied import, snapshot,
+   sorter, and ordinary search tests. No manual recovery or application retry
+   is required for this race. Ordinary writer cancellation, collection of its
+   abandoned output, and subsequent writes through a freshly opened Index must
+   continue to work. The supplied allocator can reuse a canceled output's
+   segment name after collection; retirement of an earlier file must not make
+   a later valid file with that name unusable. Safely avoiding reuse is also
+   allowed. After the subsequent commit returns, a fresh reader must see the
+   new document alongside the previously committed content.
 
-Export `CompactionConflict` and `CompactionStateError` from the module
-`whoosh.compaction`. These exception types can subclass `Exception`.
-The `segment_names` argument is a finite sequence of immutable segment names
-obtained from the `.name` attributes of `Index.segments`.
-Empty, repeated, or unknown source names raise `ValueError` at job creation.
-Successful publication advances the latest committed generation by exactly one.
+## Bounded concurrency model
 
-## Visibility and reconciliation
+Tests run offline on Python 3.12 or newer with FileStorage and RamStorage, in
+one process with multiple threads and handles, and one named index per Storage.
+FileStorage handles referring to the same directory share the same index.
+Ordinary writers are serialized by the existing writer lock. Readers and
+collectors may overlap those writers and one another; the same individual
+Index or reader object is not simultaneously mutated by multiple callers.
 
-1. The job captures the latest **committed** view at creation, even if the
-   creating Index handle is stale or has uncommitted direct deletions. Later
-   changes before `prepare()` do not change this captured view. Source segments
-   are selected by identity, not by their current global document offsets.
-   `prepare()` copies only documents that were live in that view, together with
-   their original indexed postings, positions, vectors, stored fields, and
-   metadata, without reconstructing postings by analyzing stored text.
-2. An ordinary writer using another Index handle must be able to finish its
-   commit when preparation is paused while reading or copying source data.
-   Compaction must not hold the exclusive writer lock throughout preparation.
-   Temporary short critical sections for file/name allocation are permitted.
-3. At publication, preserve the complete latest committed index state outside
-   the selected source segments, including appended segments, recent deletions,
-   and successful disjoint compactions. Additional deletions affecting selected
-   source rows since job creation must also remain effective in the merged
-   replacement. Compaction alone does not change the logical live document set.
-4. If a document deleted in the captured creation-time view is live in a
-   selected source segment at publication, `commit()` must raise `CompactionConflict`
-   rather than lose that document. The same exception is required if any
-   selected source segment has been replaced/removed, including by an
-   overlapping compaction. A conflict leaves the index unchanged and permits
-   `cancel()` of the failed job. An append or additional deletion by itself
-   must NOT cause a conflict.
-5. Disjoint jobs prepared from the same generation can both commit in either
-   order. Overlapping jobs cannot both publish. The surviving job must not
-   lose the other job's unrelated changes.
-6. Before publication, a newly opened Index observes the old committed view.
-   After successful publication, a new Index observes the new generation.
-   A new Index must remain openable while publication is paused during
-   creation or writing of its metadata: it must see a complete old or new
-   generation, never a partially written manifest. This is concurrent-reader
-   visibility, not a power-loss durability requirement.
-   The original Index handle used to create the job also reflects the published
-   generation once `commit()` returns. Old independently acquired readers must
-   retain their pre-commit view, including first-time lazy vector reads after
-   compaction. Once the last owner releases old files, collection must be able
-   to reclaim them; retaining obsolete files indefinitely is not acceptable.
-7. Failed or cancelled jobs may remove only their own unpublished artifacts.
-   Do not close another owner's handles, release another owner's writer lock,
-   delete another job's staging files, or delete the files of a different named
-   index sharing the same Storage. The other named index must stay reopenable
-   even when no Index handle for it is currently open.
-8. Preserve ordinary writing, schema-aware import, deletion/undeletion,
-   search, optimize, retained readers, and cancellation behavior. Segment
-   files continue to use the existing storage interfaces and on-disk format.
+The index already exists before concurrent work begins. Storage operations
+are reliable, except that opening a file legitimately removed by concurrent
+collection can report the backend's usual missing-file error. Tests can pause
+public Storage operations at controlled boundaries before or after discovery,
+metadata access, or before deletion takes effect. Progress is checked while
+the chosen operation remains paused; timeouts only guard against deadlock.
+No particular implementation fields, allocation counts, filenames beyond the
+existing format, or synchronization algorithm are prescribed.
 
-## Lifecycle
+Cross-process coordination, external file modifications, corrupt metadata,
+power-loss recovery, storage fault injection, replacing or recreating an index
+while operations are in flight, a new online compaction API, and reconciliation
+of concurrent document updates are outside this task. No additional memory
+complexity bound or prescribed coordination-state representation is required.
 
-- A job starts in a new state. It can prepare exactly once; a repeated
-  `prepare()` raises `CompactionStateError`.
-- `commit()` before successful `prepare()`, after `cancel()`, or after an
-  earlier successful `commit()` raises `CompactionStateError`.
-- A failed `commit()` due to a conflict leaves the job cancellable.
-- Calling `cancel()` repeatedly is harmless. `cancel()` after a successful
-  commit is harmless.
-- Interruption of preparation by an ordinary Python exception must not publish
-  partially constructed files or leave the ordinary writer lock held.
-  `cancel()` must be safe after such an exception and reclaim the job's
-  unpublished files and ownership; the exception traceback may remain alive.
-
-Compaction must read and copy from the captured source view during `prepare()`;
-job creation may capture metadata and open readers, but must not perform the
-full merge. Cancellation of one job must remain safe while an unrelated writer
-holds the write lock. A returned job owns its captured sources until it commits
-or is cancelled, so later publication and collection cannot invalidate its
-source reads.
-
-## Test model and exclusions
-
-The verifier uses FileStorage and RamStorage, multiple Index instances in one
-process, deterministic histories of append/delete/undelete/prepare/publish,
-reader ownership and lazy vector access, and controlled pause points in source
-segment reads. No power-loss durability, cross-process lease protocol, or
-multi-process writer synchronization is required. The verifier does not require
-one particular compaction algorithm or private job fields.
-
-Grading uses the final submitted source tree. Tests are run offline. Do not
-modify tests, relax correctness conditions, or replace the index engine.
+Modify the implementation under `src/whoosh/`. Do not change supplied tests or
+weaken their assertions. Keep the storage and index engine supplied here.
